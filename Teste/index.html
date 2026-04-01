@@ -1,7 +1,6 @@
 <!doctype html>
 <html lang="pt-BR" class="h-full">
-
-<head>
+ <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Controle de Fluidez</title>
@@ -13,23 +12,15 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <link rel="stylesheet" href="style.css">
-</head>
-
-<body>
+ </head>
+ <body>
   <div class="app-root" id="app">
-    <div class="main-scroll" id="mainContent"></div>
-    <nav class="bottom-nav">
-      <button class="nav-btn active" data-tab="home" onclick="switchTab('home')"> <i
-          class="fa-solid fa-house"></i><span>Início</span> </button> <button class="nav-btn" data-tab="loads"
-        onclick="switchTab('loads')"> <i class="fa-solid fa-truck"></i><span>Carregamentos</span> </button> <button
-        class="nav-btn" data-tab="materials" onclick="switchTab('materials')"> <i
-          class="fa-solid fa-flask"></i><span>Matérias</span> </button> <button class="nav-btn" data-tab="reports"
-        onclick="switchTab('reports')"> <i class="fa-solid fa-file-pdf"></i><span>Relatórios</span> </button>
-    </nav>
+   <div class="main-scroll" id="mainContent"></div>
+   <nav class="bottom-nav"><button class="nav-btn active" data-tab="home" onclick="switchTab('home')"> <i class="fa-solid fa-house"></i><span>Início</span> </button> <button class="nav-btn" data-tab="loads" onclick="switchTab('loads')"> <i class="fa-solid fa-truck"></i><span>Carregamentos</span> </button> <button class="nav-btn" data-tab="materials" onclick="switchTab('materials')"> <i class="fa-solid fa-flask"></i><span>Matérias</span> </button> <button class="nav-btn" data-tab="reports" onclick="switchTab('reports')"> <i class="fa-solid fa-file-pdf"></i><span>Relatórios</span> </button>
+   </nav>
   </div>
   <script src="script.js">
 
-  </script>
+</script>
 </body>
-
 </html>
