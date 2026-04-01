@@ -300,17 +300,17 @@ body {
 .chart-bar-container {
     display: flex;
     align-items: flex-end;
-    gap: 6px;
+    gap: 4px;
     height: 120px;
     padding: 0 8px;
+    overflow-x: auto;
 }
 
 .chart-bar {
-    flex: 1;
+    flex: 0 0 auto;
     border-radius: 4px 4px 0 0;
     transition: height .4s ease;
-    min-width: 16px;
-    max-width: 40px;
+    width: 24px;
     position: relative;
 }
 
@@ -319,9 +319,22 @@ body {
     bottom: -18px;
     left: 50%;
     transform: translateX(-50%);
-    font-size: 9px;
+    font-size: 8px;
     color: #94a3b8;
     white-space: nowrap;
+}
+
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, .6);
+    z-index: 100;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    animation: fadeIn .2s;
+    max-height: 100vh;
+    overflow-y: auto;
 }
 
 .chart-line {
