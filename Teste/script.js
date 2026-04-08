@@ -1,4 +1,3 @@
-
 // Firebase Init
 const firebaseConfig = { databaseURL: "https://materiaprima-803a4-default-rtdb.firebaseio.com" };
 firebase.initializeApp(firebaseConfig);
@@ -140,7 +139,7 @@ function renderLoads() {
         <div style="display:flex;justify-content:space-between;align-items:start">
           <div>
             <strong>${l.supplier}</strong>
-            <div style="font-size:12px;color:#94a3b8;margin-top:2px">${matName} · Lote ${l.lot} · ${l.date}</div>
+            <div style="font-size:12px;color:#94a3b8;margin-top:2px">${matName} · Lote ${l.lot} · NF: ${l.invoiceNumber || 'N/A'} · ${l.date}</div>
             <div style="font-size:12px;color:#94a3b8">Resp: ${l.responsible}</div>
           </div>
           <div style="text-align:right">
@@ -152,7 +151,6 @@ function renderLoads() {
       </div>`;
       }).join('')}
   `;
-  // Remove existing FABs
   document.querySelectorAll('.fab').forEach(f => f.remove());
   const fab = document.createElement('button');
   fab.className = 'fab';
@@ -190,17 +188,25 @@ function renderMaterials() {
 function renderReports() {
   const mc = document.getElementById('mainContent');
   const entries = Object.entries(loads);
+  
+  // Filter by month
+  const currentMonth = document.getElementById('monthFilter')?.value || new Date().toISOString().slice(0, 7);
+  const filteredEntries = entries.filter(([id, l]) => l.date && l.date.slice(0, 7) === currentMonth);
+  
   mc.innerHTML = `
-    <h1 style="font-size:20px;font-weight:700;margin-bottom:16px"><i class="fa-solid fa-file-pdf" style="color:#3b82f6;margin-right:8px"></i>Relatórios</h1>
-    ${entries.length === 0 ? '<div class="card" style="text-align:center;color:#94a3b8">Nenhum carregamento para gerar relatório.</div>' :
-      entries.reverse().map(([id, l]) => {
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h1 style="font-size:20px;font-weight:700"><i class="fa-solid fa-file-pdf" style="color:#3b82f6;margin-right:8px"></i>Relatórios</h1>
+      <input type="month" id="monthFilter" class="input-field" value="${currentMonth}" style="width:140px;height:36px;font-size:13px" onchange="renderReports()">
+    </div>
+    ${filteredEntries.length === 0 ? '<div class="card" style="text-align:center;color:#94a3b8">Nenhum carregamento neste mês.</div>' :
+      filteredEntries.reverse().map(([id, l]) => {
         const matName = materials[l.materialId]?.name || 'N/A';
         const s = getLoadStats(l);
         return `<div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center">
           <div>
             <strong>${l.supplier}</strong> — ${matName}
-            <div style="font-size:12px;color:#94a3b8">Lote ${l.lot} · ${s.total} paletes</div>
+            <div style="font-size:12px;color:#94a3b8">NF: ${l.invoiceNumber || 'N/A'} · Lote ${l.lot} · ${s.total} paletes</div>
           </div>
           <button class="btn-primary btn-sm" onclick="generatePDF('${id}')"><i class="fa-solid fa-download" style="margin-right:4px"></i>PDF</button>
         </div>
@@ -258,17 +264,21 @@ function renderLoadDetail() {
       <button class="back-btn" onclick="currentLoadId=null;renderCurrentTab()"><i class="fa-solid fa-arrow-left"></i></button>
       <div>
         <h1 style="font-size:18px;font-weight:700">${l.supplier}</h1>
-        <div style="font-size:12px;color:#94a3b8">${matName} · Lote ${l.lot}</div>
+        <div style="font-size:12px;color:#94a3b8">NF: ${l.invoiceNumber || 'N/A'} · ${matName} · Lote ${l.lot}</div>
       </div>
       <span class="badge ${status === 'APROVADO' ? 'badge-success' : status === 'REPROVADO' ? 'badge-danger' : 'badge-info'}" style="margin-left:auto">${status}</span>
     </div>
     <div class="card">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px">
         <div><span style="color:#94a3b8">Data:</span> ${l.date}</div>
-        <div><span style="color:#94a3b8">Responsável:</span> ${l.responsible}</div>
+        <div><span style="color:#94a3b8">NF:</span> ${l.invoiceNumber || 'N/A'}</div>
         <div><span style="color:#94a3b8">Faixa IF:</span> ${mat ? mat.ifMin + ' — ' + mat.ifMax : 'N/A'}</div>
         <div><span style="color:#94a3b8">Média IF:</span> ${s.avg ? s.avg.toFixed(2) : '—'}</div>
       </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <button class="btn-primary" style="flex:1" onclick="showEditLoadModal('${id}')"><i class="fa-solid fa-edit" style="margin-right:6px"></i>Editar</button>
+      <button class="btn-primary" style="flex:1" onclick="generatePDF('${id}')"><i class="fa-solid fa-download" style="margin-right:6px"></i>PDF</button>
     </div>
     ${chartHTML}
     <h2 style="font-size:15px;font-weight:600;margin-bottom:10px">Paletes (${s.total})</h2>
@@ -351,6 +361,7 @@ function showNewLoadModal() {
     <h2 style="font-size:18px;font-weight:700;margin-bottom:16px"><i class="fa-solid fa-truck" style="color:#3b82f6;margin-right:8px"></i>Novo Carregamento</h2>
     <form id="loadForm" style="display:flex;flex-direction:column;gap:12px">
       <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:4px">Data</label><input class="input-field" id="loadDate" type="date" required></div>
+      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:4px">Nota Fiscal</label><input class="input-field" id="loadInvoice" required placeholder="Número da NF"></div>
       <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:4px">Fornecedor</label><input class="input-field" id="loadSupplier" required placeholder="Nome do fornecedor"></div>
       <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:4px">Lote</label><input class="input-field" id="loadLot" required placeholder="Número do lote"></div>
       <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:4px">Responsável</label><input class="input-field" id="loadResp" required placeholder="Nome do responsável"></div>
@@ -369,13 +380,55 @@ function showNewLoadModal() {
   document.getElementById('loadForm').onsubmit = e => {
     e.preventDefault();
     const date = document.getElementById('loadDate').value;
+    const invoiceNumber = document.getElementById('loadInvoice').value.trim();
     const supplier = document.getElementById('loadSupplier').value.trim();
     const lot = document.getElementById('loadLot').value.trim();
     const responsible = document.getElementById('loadResp').value.trim();
     const materialId = document.getElementById('loadMat').value;
-    if (!date || !supplier || !lot || !responsible) { toast('Preencha todos os campos', true); return; }
-    db.ref('loads').push({ date, supplier, lot, responsible, materialId });
+    if (!date || !invoiceNumber || !supplier || !lot || !responsible) { toast('Preencha todos os campos', true); return; }
+    db.ref('loads').push({ date, invoiceNumber, supplier, lot, responsible, materialId });
     toast('Carregamento criado!');
+    closeModal();
+  };
+}
+
+function showEditLoadModal(id) {
+  const l = loads[id];
+  if (!l) return;
+  const matEntries = Object.entries(materials);
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+  overlay.innerHTML = `<div class="modal-content">
+    <h2 style="font-size:18px;font-weight:700;margin-bottom:16px"><i class="fa-solid fa-edit" style="color:#3b82f6;margin-right:8px"></i>Editar Carregamento</h2>
+    <form id="editLoadForm" style="display:flex;flex-direction:column;gap:12px">
+      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:4px">Data</label><input class="input-field" id="editDate" type="date" required value="${l.date}"></div>
+      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:4px">Nota Fiscal</label><input class="input-field" id="editInvoice" required placeholder="Número da NF" value="${l.invoiceNumber || ''}"></div>
+      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:4px">Fornecedor</label><input class="input-field" id="editSupplier" required placeholder="Nome do fornecedor" value="${l.supplier}"></div>
+      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:4px">Lote</label><input class="input-field" id="editLot" required placeholder="Número do lote" value="${l.lot}"></div>
+      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:4px">Responsável</label><input class="input-field" id="editResp" required placeholder="Nome do responsável" value="${l.responsible}"></div>
+      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:4px">Matéria-Prima</label>
+        <select class="input-field" id="editMat" required>
+          ${matEntries.map(([mid, m]) => `<option value="${mid}" ${mid === l.materialId ? 'selected' : ''}>${m.name}</option>`).join('')}
+        </select>
+      </div>
+      <button type="submit" class="btn-primary" style="width:100%">Atualizar</button>
+    </form>
+  </div>`;
+  document.body.appendChild(overlay);
+  window.addEventListener('resize', handleViewportChange);
+  handleViewportChange();
+  document.getElementById('editLoadForm').onsubmit = e => {
+    e.preventDefault();
+    const date = document.getElementById('editDate').value;
+    const invoiceNumber = document.getElementById('editInvoice').value.trim();
+    const supplier = document.getElementById('editSupplier').value.trim();
+    const lot = document.getElementById('editLot').value.trim();
+    const responsible = document.getElementById('editResp').value.trim();
+    const materialId = document.getElementById('editMat').value;
+    if (!date || !invoiceNumber || !supplier || !lot || !responsible) { toast('Preencha todos os campos', true); return; }
+    db.ref('loads/' + id).update({ date, invoiceNumber, supplier, lot, responsible, materialId });
+    toast('Carregamento atualizado!');
     closeModal();
   };
 }
@@ -409,7 +462,6 @@ function showNewPaleteModal(loadId) {
 
 // DELETE
 function deleteMaterial(id) {
-  // Inline confirm
   const card = event.target.closest('.card');
   if (card.querySelector('.confirm-row')) return;
   const row = document.createElement('div');
@@ -447,18 +499,20 @@ function generatePDF(id) {
 
   // Header
   doc.setFillColor(15, 23, 42);
-  doc.rect(0, 0, 210, 40, 'F');
+  doc.rect(0, 0, 210, 50, 'F');
   doc.setTextColor(241, 245, 249);
   doc.setFontSize(20);
   doc.text(appTitle, 14, 18);
-  doc.setFontSize(11);
-  doc.text('Relatório de Carregamento', 14, 28);
+  doc.setFontSize(12);
+  doc.text('Relatório de Carregamento', 14, 30);
+  doc.setFontSize(10);
+  doc.text('NF: ' + (l.invoiceNumber || 'N/A'), 14, 38);
   doc.setFontSize(9);
-  doc.text('Gerado em: ' + new Date().toLocaleString('pt-BR'), 14, 35);
+  doc.text('Gerado em: ' + new Date().toLocaleString('pt-BR'), 14, 45);
 
   // Info
   doc.setTextColor(30, 41, 59);
-  let y = 50;
+  let y = 58;
   doc.setFontSize(12);
   doc.setFont(undefined, 'bold');
   doc.text('Dados do Carregamento', 14, y);
@@ -466,8 +520,12 @@ function generatePDF(id) {
   doc.setFont(undefined, 'normal');
   doc.setFontSize(10);
   const info = [
-    ['Fornecedor', l.supplier], ['Lote', l.lot], ['Data', l.date],
-    ['Responsável', l.responsible], ['Matéria-Prima', matName],
+    ['Nota Fiscal', l.invoiceNumber || 'N/A'],
+    ['Fornecedor', l.supplier],
+    ['Lote', l.lot],
+    ['Data', l.date],
+    ['Responsável', l.responsible],
+    ['Matéria-Prima', matName],
     ['Faixa IF', mat ? mat.ifMin + ' — ' + mat.ifMax + ' g/10min' : 'N/A']
   ];
   info.forEach(([k, v]) => {
@@ -510,9 +568,10 @@ function generatePDF(id) {
   doc.setFontSize(10);
   doc.text(`Média IF: ${s.avg.toFixed(2)} g/10min | ${s.approved}/${s.total} aprovados (${s.pct}%)`, 20, y + 18);
 
-  doc.save(`Relatorio_${l.supplier}_${l.lot}.pdf`);
+  doc.save(`Relatorio_NF${l.invoiceNumber}_${l.supplier}.pdf`);
   toast('PDF gerado!');
 }
 
 // Initial render
 renderCurrentTab();
+
