@@ -11,16 +11,17 @@
   <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
   <link rel="stylesheet" href="style.css">
  </head>
  <body>
   <div class="app-root" id="app">
    <div class="main-scroll" id="mainContent"></div>
-   <nav class="bottom-nav"><button class="nav-btn active" data-tab="home" onclick="switchTab('home')"> <i class="fa-solid fa-house"></i><span>Início</span> </button> <button class="nav-btn" data-tab="loads" onclick="switchTab('loads')"> <i class="fa-solid fa-truck"></i><span>Carregamentos</span> </button> <button class="nav-btn" data-tab="materials" onclick="switchTab('materials')"> <i class="fa-solid fa-flask"></i><span>Matérias</span> </button> <button class="nav-btn" data-tab="reports" onclick="switchTab('reports')"> <i class="fa-solid fa-file-pdf"></i><span>Relatórios</span> </button>
+   <nav class="bottom-nav">
+    <button class="nav-btn active" data-tab="home" onclick="switchTab('home')"> <i class="fa-solid fa-house"></i><span>Início</span> </button> <button class="nav-btn" data-tab="loads" onclick="switchTab('loads')"> <i class="fa-solid fa-truck"></i><span>Carregamentos</span> </button> <button class="nav-btn" data-tab="camera" onclick="switchTab('camera')"> <i class="fa-solid fa-camera"></i><span>Câmera</span> </button> <button class="nav-btn" data-tab="qrcode" onclick="switchTab('qrcode')"> <i class="fa-solid fa-qrcode"></i><span>QR Code</span> </button> <button class="nav-btn" data-tab="materials" onclick="switchTab('materials')"> <i class="fa-solid fa-flask"></i><span>Matérias</span> </button>
    </nav>
   </div>
-  <script src="script.js">
-
-</script>
+<script src="script.js"></script>
 </body>
 </html>
