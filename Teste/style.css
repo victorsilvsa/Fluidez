@@ -326,19 +326,6 @@ body {
     white-space: nowrap;
 }
 
-.modal-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, .6);
-    z-index: 100;
-    display: flex;
-    align-items: flex-end;
-    justify-content: center;
-    animation: fadeIn .2s;
-    max-height: 100vh;
-    overflow-y: auto;
-}
-
 .chart-line {
     position: absolute;
     left: 0;
@@ -349,6 +336,35 @@ body {
 
 select.input-field {
     appearance: none;
+}
+
+.qr-container {
+    background: #fff;
+    padding: 20px;
+    border-radius: 12px;
+    margin: 16px 0;
+    display: flex;
+    justify-content: center;
+}
+
+.camera-preview {
+    width: 100%;
+    height: 300px;
+    background: #0f172a;
+    border-radius: 8px;
+    object-fit: cover;
+    margin-bottom: 12px;
+}
+
+.qr-info-display {
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 12px;
+    margin: 12px 0;
+    font-size: 12px;
+    color: #94a3b8;
+    word-break: break-all;
 }
 
 @media (max-height: 600px) {
