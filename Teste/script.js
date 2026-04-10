@@ -1,4 +1,3 @@
-
 // Firebase Init
 const firebaseConfig = { databaseURL: "https://materiaprima-803a4-default-rtdb.firebaseio.com" };
 firebase.initializeApp(firebaseConfig);
@@ -12,6 +11,11 @@ let currentLoadId = null;
 let appTitle = 'Controle de Fluidez';
 let qrCache = {};
 let scannedQRs = {};
+let UIState = {
+  expandedLoadId: null,
+  showAdvancedOptions: false,
+  filterMonth: null
+};
 
 // Element SDK
 const defaultConfig = {
@@ -60,7 +64,7 @@ db.ref('loads').on('value', snap => {
   renderCurrentTab();
 });
 
-// Helpers
+// ==================== HELPERS ====================
 function toast(msg, error = false) {
   const t = document.createElement('div');
   t.className = 'toast' + (error ? ' toast-error' : '');
@@ -111,6 +115,7 @@ function getLoadStats(load) {
 function switchTab(tab) {
   currentTab = tab;
   currentLoadId = null;
+  UIState.expandedLoadId = null;
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   renderCurrentTab();
 }
@@ -128,7 +133,7 @@ function renderCurrentTab() {
   }
 }
 
-// HOME
+// ==================== HOME TAB ====================
 function renderHome() {
   const mc = document.getElementById('mainContent');
   const allLoads = Object.values(loads);
@@ -150,7 +155,7 @@ function renderHome() {
       recentLoads.map(([id, l]) => {
         const s = getLoadStats(l);
         const matName = materials[l.materialId]?.name || 'N/A';
-        return `<div class="card" style="cursor:pointer;transition:all 0.3s ease" onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 16px rgba(59, 130, 246, 0.15)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 4px 6px rgba(0, 0, 0, 0.2)'" onclick="openLoad('${id}')">
+        return `<div class="card" style="cursor:pointer;transition:all 0.3s ease" onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 16px rgba(59, 130, 246, 0.15)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 4px 6px rgba(0, 0, 0, 0.2)'" onclick="openLoadDetail('${id}')">
           <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px">
             <div>
               <div style="font-size:14px;font-weight:600;color:#f1f5f9">${l.supplier}</div>
@@ -166,7 +171,7 @@ function renderHome() {
   `;
 }
 
-// LOADS
+// ==================== LOADS TAB ====================
 function renderLoads() {
   const mc = document.getElementById('mainContent');
   const entries = Object.entries(loads);
@@ -192,47 +197,75 @@ function renderLoads() {
   const grouped = groupLoadsByMonth(sortLoadsByDate(entries));
   const monthKeys = Object.keys(grouped).sort().reverse();
 
-  mc.innerHTML = `
-    <h1 style="font-size:20px;font-weight:700;margin-bottom:20px"><i class="fa-solid fa-truck" style="color:#3b82f6;margin-right:8px"></i>Carregamentos</h1>
-    ${monthKeys.map(monthKey => {
+  let html = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h1 style="font-size:20px;font-weight:700"><i class="fa-solid fa-truck" style="color:#3b82f6;margin-right:8px"></i>Carregamentos</h1>
+      <button id="toggleAdvOpts" class="btn-secondary" style="padding:8px 12px;background:#334155;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600">
+        <i class="fa-solid fa-sliders" style="margin-right:6px"></i>Opções
+      </button>
+    </div>
+    
+    <div id="advancedOptionsPanel" style="display:none;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px;margin-bottom:16px">
+      <div style="font-size:12px;color:#94a3b8;margin-bottom:8px;font-weight:600">FILTROS E AÇÕES</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <button class="btn-secondary" style="padding:8px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:11px;font-weight:600" onclick="generateAllQRPDFs()">
+          <i class="fa-solid fa-qrcode" style="margin-right:4px"></i>QR Códigos
+        </button>
+        <button class="btn-secondary" style="padding:8px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:11px;font-weight:600" onclick="generateAllReports()">
+          <i class="fa-solid fa-file-pdf" style="margin-right:4px"></i>Relatórios
+        </button>
+      </div>
+    </div>
+  `;
+
+  html += monthKeys.map(monthKey => {
     const group = grouped[monthKey];
     return `
-        <div style="margin-bottom:20px">
-          <h3 style="font-size:13px;font-weight:700;color:#64748b;text-transform:capitalize;margin-bottom:12px;padding:0 12px;letter-spacing:0.5px">${group.name}</h3>
-          ${group.loads.map(([id, l]) => {
+      <div style="margin-bottom:20px">
+        <h3 style="font-size:13px;font-weight:700;color:#64748b;text-transform:capitalize;margin-bottom:12px;padding:0 12px;letter-spacing:0.5px">${group.name}</h3>
+        ${group.loads.map(([id, l]) => {
       const s = getLoadStats(l);
       const matName = materials[l.materialId]?.name || 'N/A';
       const statusColor = s.total === 0 ? 'badge-info' : s.pct >= 80 ? 'badge-success' : 'badge-danger';
       const statusText = s.total === 0 ? 'Pendente' : s.pct + '% OK';
       return `
-              <div class="card" style="cursor:pointer;margin-bottom:10px;transition:all 0.3s ease" onmouseover="this.style.transform='translateX(4px)'" onmouseout="this.style.transform='translateX(0)'" onclick="openLoad('${id}')">
-                <div style="display:flex;justify-content:space-between;align-items:start;gap:12px">
-                  <div style="flex:1">
-                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                      <div style="width:4px;height:24px;background:${s.pct >= 80 ? '#22c55e' : '#ef4444'};border-radius:2px"></div>
-                      <strong style="font-size:14px">${l.supplier}</strong>
-                    </div>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px;color:#94a3b8;margin-bottom:6px">
-                      <div><i class="fa-solid fa-calendar" style="margin-right:4px;width:12px"></i>${formatDate(l.date)}</div>
-                      <div><i class="fa-solid fa-file" style="margin-right:4px;width:12px"></i>NF: ${l.invoiceNumber || 'N/A'}</div>
-                      <div><i class="fa-solid fa-cube" style="margin-right:4px;width:12px"></i>Lote: ${l.lot}</div>
-                      <div><i class="fa-solid fa-flask" style="margin-right:4px;width:12px"></i>${matName}</div>
-                    </div>
-                    <div style="font-size:10px;color:#64748b"><i class="fa-solid fa-user" style="margin-right:4px;width:12px"></i>Resp: ${l.responsible}</div>
+            <div class="card" style="cursor:pointer;margin-bottom:10px;transition:all 0.3s ease" onmouseover="this.style.transform='translateX(4px)'" onmouseout="this.style.transform='translateX(0)'" onclick="openLoadDetail('${id}')">
+              <div style="display:flex;justify-content:space-between;align-items:start;gap:12px">
+                <div style="flex:1">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                    <div style="width:4px;height:24px;background:${s.pct >= 80 ? '#22c55e' : '#ef4444'};border-radius:2px"></div>
+                    <strong style="font-size:14px">${l.supplier}</strong>
                   </div>
-                  <div style="text-align:right">
-                    <span class="badge ${statusColor}" style="font-weight:600;white-space:nowrap">${statusText}</span>
-                    <div style="font-size:11px;color:#94a3b8;margin-top:6px">${s.total} paletes</div>
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px;color:#94a3b8;margin-bottom:6px">
+                    <div><i class="fa-solid fa-calendar" style="margin-right:4px;width:12px"></i>${formatDate(l.date)}</div>
+                    <div><i class="fa-solid fa-file" style="margin-right:4px;width:12px"></i>NF: ${l.invoiceNumber || 'N/A'}</div>
+                    <div><i class="fa-solid fa-cube" style="margin-right:4px;width:12px"></i>Lote: ${l.lot}</div>
+                    <div><i class="fa-solid fa-flask" style="margin-right:4px;width:12px"></i>${matName}</div>
                   </div>
+                  <div style="font-size:10px;color:#64748b"><i class="fa-solid fa-user" style="margin-right:4px;width:12px"></i>Resp: ${l.responsible}</div>
                 </div>
-                <div class="progress-bar" style="margin-top:10px"><div class="progress-fill" style="width:${s.pct}%;background:${s.pct >= 80 ? '#22c55e' : '#ef4444'};transition:width 0.3s ease"></div></div>
+                <div style="text-align:right">
+                  <span class="badge ${statusColor}" style="font-weight:600;white-space:nowrap">${statusText}</span>
+                  <div style="font-size:11px;color:#94a3b8;margin-top:6px">${s.total} paletes</div>
+                </div>
               </div>
-            `;
+              <div class="progress-bar" style="margin-top:10px"><div class="progress-fill" style="width:${s.pct}%;background:${s.pct >= 80 ? '#22c55e' : '#ef4444'};transition:width 0.3s ease"></div></div>
+            </div>
+          `;
     }).join('')}
-        </div>
-      `;
-  }).join('')}
-  `;
+      </div>
+    `;
+  }).join('');
+
+  mc.innerHTML = html;
+
+  // Toggle Advanced Options
+  document.getElementById('toggleAdvOpts').onclick = function () {
+    const panel = document.getElementById('advancedOptionsPanel');
+    UIState.showAdvancedOptions = !UIState.showAdvancedOptions;
+    panel.style.display = UIState.showAdvancedOptions ? 'block' : 'none';
+    this.style.background = UIState.showAdvancedOptions ? '#3b82f6' : '#334155';
+  };
 
   document.querySelectorAll('.fab').forEach(f => f.remove());
   const fab = document.createElement('button');
@@ -241,13 +274,27 @@ function renderLoads() {
   fab.onclick = () => showNewLoadModal();
   document.body.appendChild(fab);
 }
-// QR CODE TAB
+
+// ==================== QR CODE TAB ====================
 function renderQRCode() {
   const mc = document.getElementById('mainContent');
   const entries = Object.entries(loads);
 
   mc.innerHTML = `
-    <h1 style="font-size:20px;font-weight:700;margin-bottom:20px"><i class="fa-solid fa-qrcode" style="color:#3b82f6;margin-right:8px"></i>Gerador de QR Code</h1>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <h1 style="font-size:20px;font-weight:700"><i class="fa-solid fa-qrcode" style="color:#3b82f6;margin-right:8px"></i>Gerador de QR Codes</h1>
+      <button id="toggleQROptions" class="btn-secondary" style="padding:8px 12px;background:#334155;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600">
+        <i class="fa-solid fa-cog" style="margin-right:6px"></i>Ações
+      </button>
+    </div>
+    
+    <div id="qrOptionsPanel" style="display:none;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px;margin-bottom:16px">
+      <div style="font-size:12px;color:#94a3b8;margin-bottom:8px;font-weight:600">OPÇÕES RÁPIDAS</div>
+      <button class="btn-secondary" style="width:100%;padding:10px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600;margin-bottom:8px" onclick="generateAllQRPDFs()">
+        <i class="fa-solid fa-download" style="margin-right:6px"></i>Baixar Todos QR Codes em PDF
+      </button>
+    </div>
+    
     ${entries.length === 0 ? '<div class="card" style="text-align:center;color:#94a3b8;padding:32px"><i class="fa-solid fa-inbox" style="font-size:40px;margin-bottom:12px;display:block"></i><p>Nenhum carregamento para gerar QR Code</p></div>' :
       entries.map(([id, l]) => {
         const s = getLoadStats(l);
@@ -266,6 +313,14 @@ function renderQRCode() {
         `;
       }).join('')}
   `;
+
+  document.getElementById('toggleQROptions').onclick = function () {
+    const panel = document.getElementById('qrOptionsPanel');
+    const isVisible = panel.style.display !== 'none';
+    panel.style.display = isVisible ? 'none' : 'block';
+    this.style.background = isVisible ? '#334155' : '#3b82f6';
+  };
+
   document.querySelectorAll('.fab').forEach(f => f.remove());
 }
 
@@ -284,6 +339,15 @@ function openQRGenerator(loadId) {
         <h1 style="font-size:20px;font-weight:700">${l.supplier}</h1>
         <div style="font-size:12px;color:#94a3b8;margin-top:4px">Lote ${l.lot} · ${matName}</div>
       </div>
+    </div>
+    
+    <div style="display:flex;gap:8px;margin-bottom:16px">
+      <button class="btn-primary" style="flex:1;padding:10px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600" onclick="generateQRPDFLoad('${loadId}')">
+        <i class="fa-solid fa-file-pdf" style="margin-right:6px"></i>Gerar PDF Todos
+      </button>
+      <button class="btn-primary" style="flex:1;padding:10px;background:#22c55e;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600" onclick="showBulkPaleteModal('${loadId}')">
+        <i class="fa-solid fa-plus" style="margin-right:6px"></i>Adicionar Lote
+      </button>
     </div>
     
     <h2 style="font-size:14px;font-weight:700;margin:16px 0 12px 0;color:#f1f5f9"><i class="fa-solid fa-cubes" style="margin-right:6px;color:#3b82f6"></i>Selecione um Palete</h2>
@@ -412,15 +476,12 @@ function downloadQRCodePDF(qrId, filename) {
     format: 'a4'
   });
 
-  // Fundo branco
   doc.setFillColor(255, 255, 255);
   doc.rect(0, 0, 210, 297, 'F');
 
-  // Header com fundo escuro
   doc.setFillColor(15, 23, 42);
   doc.rect(0, 0, 210, 55, 'F');
 
-  // Info no header
   doc.setTextColor(241, 245, 249);
   doc.setFontSize(11);
   doc.setFont(undefined, 'normal');
@@ -434,38 +495,30 @@ function downloadQRCodePDF(qrId, filename) {
   doc.setFontSize(8);
   doc.text('Data: ' + formatDate(dataRegistro), 15, 45);
 
-  // Número do palete acima do QR Code - MAIOR
   doc.setTextColor(30, 41, 59);
   doc.setFontSize(32);
   doc.setFont(undefined, 'bold');
   doc.text('PALETE #' + paleteNum, 105, 72, { align: 'center' });
 
-  // QR Code centralizado
   const qrImage = canvas.toDataURL('image/png');
   const qrSize = 120;
   const qrX = (210 - qrSize) / 2;
   doc.addImage(qrImage, 'PNG', qrX, 85, qrSize, qrSize);
 
-  // Seção de detalhes do material
   doc.setTextColor(30, 41, 59);
   doc.setFontSize(12);
   doc.setFont(undefined, 'bold');
   doc.text('DETALHES DA MATÉRIA-PRIMA', 15, 220);
 
-  // Linha separadora
   doc.setDrawColor(59, 130, 246);
   doc.setLineWidth(0.5);
   doc.line(15, 224, 195, 224);
 
-  // Info da matéria-prima - MAIOR
   doc.setFont(undefined, 'normal');
   doc.setFontSize(12);
-  doc.setTextColor(30, 41, 59);
-
   doc.text('Tipo: ' + matName, 15, 238);
   doc.text('Data de Chegada: ' + formatDate(dataRegistro), 15, 252);
 
-  // Footer
   doc.setFontSize(8);
   doc.setTextColor(150, 160, 170);
   doc.text('EMBALAGENS TATUÍ', 15, 290);
@@ -474,62 +527,154 @@ function downloadQRCodePDF(qrId, filename) {
   toast('PDF gerado!');
 }
 
+function generateQRPDFLoad(loadId) {
+  const { jsPDF } = window.jspdf;
+  const l = loads[loadId];
+  if (!l || !l.paletes) { toast('Sem paletes para gerar QR Codes', true); return; }
 
+  const mat = materials[l.materialId];
+  const matName = mat?.name || 'N/A';
+  const paletes = Object.entries(l.paletes);
 
-// MATERIALS
-function renderMaterials() {
-  const mc = document.getElementById('mainContent');
-  const entries = Object.entries(materials);
-  mc.innerHTML = `
-    <h1 style="font-size:20px;font-weight:700;margin-bottom:20px"><i class="fa-solid fa-flask" style="color:#3b82f6;margin-right:8px"></i>Matérias-Primas</h1>
-    ${entries.length === 0 ? '<div class="card" style="text-align:center;color:#94a3b8;padding:32px"><i class="fa-solid fa-inbox" style="font-size:40px;margin-bottom:12px;display:block"></i><p>Nenhuma matéria-prima cadastrada</p></div>' :
-      entries.map(([id, m]) => `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px">
-        <div style="flex:1">
-          <strong style="font-size:14px;display:block;margin-bottom:6px">${m.name}</strong>
-          <div style="font-size:12px;color:#94a3b8"><i class="fa-solid fa-gauge" style="margin-right:4px;width:12px"></i>Faixa IF: ${m.ifMin} — ${m.ifMax} g/10min</div>
-        </div>
-        <button class="btn-danger btn-sm" onclick="deleteMaterial('${id}')"><i class="fa-solid fa-trash"></i></button>
-      </div>`).join('')}
-  `;
-  document.querySelectorAll('.fab').forEach(f => f.remove());
-  const fab = document.createElement('button');
-  fab.className = 'fab';
-  fab.innerHTML = '<i class="fa-solid fa-plus"></i>';
-  fab.onclick = () => showNewMaterialModal();
-  document.body.appendChild(fab);
+  const doc = new jsPDF({
+    orientation: 'portrait',
+    unit: 'mm',
+    format: 'a4'
+  });
+
+  let isFirstPage = true;
+  let qrCount = 0;
+  let qrsGenerated = 0;
+
+  const generateQRsAndPDF = async () => {
+    for (let index = 0; index < paletes.length; index++) {
+      const [pid, p] = paletes[index];
+
+      if (!isFirstPage) {
+        doc.addPage();
+      }
+      isFirstPage = false;
+
+      const paleteNum = index + 1;
+
+      doc.setFillColor(255, 255, 255);
+      doc.rect(0, 0, 210, 297, 'F');
+
+      doc.setFillColor(15, 23, 42);
+      doc.rect(0, 0, 210, 50, 'F');
+
+      doc.setTextColor(241, 245, 249);
+      doc.setFontSize(11);
+      doc.setFont(undefined, 'normal');
+      doc.text('PALETE #' + paleteNum, 15, 10);
+      doc.text('Lote: ' + l.lot, 15, 20);
+      doc.text('Material: ' + matName, 15, 30);
+
+      doc.setTextColor(200, 200, 200);
+      doc.setFontSize(8);
+      doc.text('Data: ' + formatDate(p.date), 15, 40);
+
+      doc.setTextColor(30, 41, 59);
+      doc.setFontSize(32);
+      doc.setFont(undefined, 'bold');
+      doc.text('PALETE #' + paleteNum, 105, 72, { align: 'center' });
+
+      const qrData = {
+        supplier: l.supplier,
+        invoiceNumber: l.invoiceNumber,
+        lot: l.lot,
+        material: matName,
+        paleteNumber: paleteNum,
+        date: formatDate(p.date),
+        responsible: l.responsible,
+        ifValue: p.ifValue
+      };
+
+      const qrString = JSON.stringify(qrData);
+
+      await new Promise((resolve) => {
+        const tempContainer = document.createElement('div');
+        tempContainer.style.display = 'none';
+        document.body.appendChild(tempContainer);
+
+        new QRCode(tempContainer, {
+          text: qrString,
+          width: 200,
+          height: 200,
+          colorDark: '#000000',
+          colorLight: '#ffffff'
+        });
+
+        setTimeout(() => {
+          const canvas = tempContainer.querySelector('canvas');
+          if (canvas) {
+            const qrImage = canvas.toDataURL('image/png');
+            const qrSize = 120;
+            const qrX = (210 - qrSize) / 2;
+            doc.addImage(qrImage, 'PNG', qrX, 85, qrSize, qrSize);
+            qrsGenerated++;
+          }
+          tempContainer.remove();
+          resolve();
+        }, 200);
+      });
+
+      doc.setTextColor(30, 41, 59);
+      doc.setFontSize(12);
+      doc.setFont(undefined, 'bold');
+      doc.text('DETALHES DA MATÉRIA-PRIMA', 15, 220);
+
+      doc.setDrawColor(59, 130, 246);
+      doc.setLineWidth(0.5);
+      doc.line(15, 224, 195, 224);
+
+      doc.setFont(undefined, 'normal');
+      doc.setFontSize(12);
+      doc.text('Tipo: ' + matName, 15, 238);
+      doc.text('Data de Chegada: ' + formatDate(p.date), 15, 252);
+      doc.text('IF Value: ' + p.ifValue.toFixed(2) + ' g/10min', 15, 266);
+
+      doc.setFontSize(8);
+      doc.setTextColor(150, 160, 170);
+      doc.text('EMBALAGENS TATUÍ', 15, 290);
+    }
+
+    doc.save(`QR_Codes_Lote_${l.lot}.pdf`);
+    toast('PDF com ' + qrsGenerated + ' QR Code(s) gerado!');
+  };
+
+  generateQRsAndPDF();
 }
 
-// REPORTS
-function renderReports() {
-  const mc = document.getElementById('mainContent');
-  const entries = Object.entries(loads);
+function generateAllQRPDFs() {
+  const allLoads = Object.entries(loads);
+  if (allLoads.length === 0) { toast('Nenhum carregamento', true); return; }
 
-  const currentMonth = document.getElementById('monthFilter')?.value || new Date().toISOString().slice(0, 7);
-  const filteredEntries = entries.filter(([id, l]) => l.date && l.date.slice(0, 7) === currentMonth);
-  const sorted = sortLoadsByDate(filteredEntries);
+  let processedCount = 0;
+  const totalLoads = allLoads.length;
 
-  mc.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;gap:12px">
-      <h1 style="font-size:20px;font-weight:700"><i class="fa-solid fa-file-pdf" style="color:#3b82f6;margin-right:8px"></i>Relatórios</h1>
-      <input type="month" id="monthFilter" class="input-field" value="${currentMonth}" style="width:140px;height:36px;font-size:13px" onchange="renderReports()">
-    </div>
-    ${sorted.length === 0 ? '<div class="card" style="text-align:center;color:#94a3b8;padding:32px"><i class="fa-solid fa-calendar-x" style="font-size:40px;margin-bottom:12px;display:block"></i><p>Nenhum carregamento neste mês</p></div>' :
-      sorted.map(([id, l]) => {
-        const matName = materials[l.materialId]?.name || 'N/A';
-        const s = getLoadStats(l);
-        return `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px">
-          <div style="flex:1">
-            <strong style="display:block;font-size:14px;margin-bottom:4px">${l.supplier}</strong>
-            <div style="font-size:11px;color:#94a3b8"><i class="fa-solid fa-calendar" style="margin-right:4px;width:12px"></i>${formatDate(l.date)} · NF: ${l.invoiceNumber || 'N/A'} · Lote ${l.lot}</div>
-            <div style="font-size:11px;color:#64748b;margin-top:2px">${matName} · ${s.total} paletes</div>
-          </div>
-          <button class="btn-primary btn-sm" onclick="generatePDF('${id}')"><i class="fa-solid fa-download" style="margin-right:4px"></i>PDF</button>
-        </div>`;
-      }).join('')}
-  `;
-  document.querySelectorAll('.fab').forEach(f => f.remove());
+  const processLoad = (index) => {
+    if (index >= allLoads.length) {
+      toast(`Gerados ${processedCount} PDF(s) com QR Codes!`);
+      return;
+    }
+
+    const [id] = allLoads[index];
+
+    setTimeout(() => {
+      generateQRPDFLoad(id);
+      processedCount++;
+      processLoad(index + 1);
+    }, 800);
+  };
+
+  toast('Gerando ' + totalLoads + ' PDF(s)...');
+  processLoad(0);
 }
-// CAMERA TAB
+
+
+
+// ==================== CAMERA TAB ====================
 function renderCamera() {
   const mc = document.getElementById('mainContent');
   mc.innerHTML = `
@@ -542,14 +687,12 @@ function renderCamera() {
         <span style="font-weight:600">Câmera não iniciada</span>
       </div>
       
-      <!-- Targeting reticle - Simples -->
       <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:10;opacity:0;transition:opacity 0.3s" id="cameraReticle">
         <div style="width:200px;height:200px;border:2px solid #3b82f6;border-radius:50%;position:relative">
           <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:6px;height:6px;background:#22c55e;border-radius:50%;box-shadow:0 0 10px rgba(34,197,94,0.8)"></div>
         </div>
       </div>
       
-      <!-- Status badge -->
       <div id="cameraStatus" style="position:absolute;top:12px;left:12px;display:flex;align-items:center;gap:6px;background:rgba(34,197,94,0.15);padding:8px 12px;border-radius:6px;border:1px solid rgba(34,197,94,0.4);opacity:0;transition:opacity 0.3s;font-size:11px;color:#22c55e;font-weight:600">
         <div style="width:6px;height:6px;background:#22c55e;border-radius:50%;animation:pulse 1.5s infinite"></div>
         <span>Ativo</span>
@@ -605,15 +748,14 @@ function renderCamera() {
           reticle.style.opacity = '1';
           isCameraActive = true;
 
-          // Start scanning com intervalo otimizado
           scanInterval = setInterval(() => {
             if (!isCameraActive || videoElement.videoWidth === 0) return;
 
             const now = Date.now();
-            if (now - lastScannedTime < 500) return; // Evita múltiplas leituras
+            if (now - lastScannedTime < 500) return;
 
             const canvas = document.createElement('canvas');
-            canvas.width = 640; // Reduz resolução para performance
+            canvas.width = 640;
             canvas.height = 480;
             const ctx = canvas.getContext('2d', { willReadFrequently: true });
             ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
@@ -635,10 +777,10 @@ function renderCamera() {
                     }
                   }, 400);
                 }
-                handleScannedQR(qrData);
+                handleScannedQRCamera(qrData);
               } catch (e) { }
             }
-          }, 500); // Intervalo maior para economizar recursos
+          }, 500);
         } catch (err) {
           toast('Erro ao acessar câmera: ' + err.message, true);
         }
@@ -663,7 +805,7 @@ function renderCamera() {
   }, 100);
 }
 
-function handleScannedQR(qrData) {
+function handleScannedQRCamera(qrData) {
   const resultsDiv = document.getElementById('scannedResults');
   const qrCounter = document.getElementById('qrCounter');
   const qrId = `${qrData.supplier}-${qrData.lot}-${qrData.paleteNumber}`;
@@ -749,8 +891,6 @@ function showScannedQRModal(qrId) {
   }, 100);
 }
 
-
-
 function downloadScannedQRImage(qrId, filename) {
   const qrElement = document.getElementById(qrId);
   const canvas = qrElement.querySelector('canvas');
@@ -777,20 +917,12 @@ function downloadScannedQRPDF(qrId, filename, qrDataEncoded) {
     format: 'a4'
   });
 
-  // Fundo branco
   doc.setFillColor(255, 255, 255);
   doc.rect(0, 0, 210, 297, 'F');
 
-  // Header Premium
-  const gradient = doc.createLinearGradient(0, 0, 210, 40);
   doc.setFillColor(15, 23, 42);
   doc.rect(0, 0, 210, 50, 'F');
 
-  // Linha decorativa
-  doc.setFillColor(59, 130, 246);
-  doc.rect(0, 50, 210, 2, 'F');
-
-  // Título
   doc.setTextColor(59, 130, 246);
   doc.setFontSize(28);
   doc.setFont(undefined, 'bold');
@@ -798,27 +930,22 @@ function downloadScannedQRPDF(qrId, filename, qrDataEncoded) {
   doc.setFontSize(24);
   doc.text('#' + qrData.paleteNumber, 75, 25);
 
-  // Subtítulo
   doc.setTextColor(100, 116, 139);
   doc.setFontSize(10);
   doc.setFont(undefined, 'normal');
   doc.text('Lote: ' + qrData.lot + ' | Data: ' + qrData.date, 15, 37);
 
-  // QR Code grande e centralizado
   const qrImage = canvas.toDataURL('image/png');
   const qrSize = 110;
   const qrX = (210 - qrSize) / 2;
   doc.addImage(qrImage, 'PNG', qrX, 65, qrSize, qrSize);
 
-  // Moldura ao redor do QR
   doc.setDrawColor(220, 220, 220);
   doc.setLineWidth(0.5);
   doc.rect(qrX - 5, 60, qrSize + 10, qrSize + 10);
 
-  // Seção de informações em cards
   let cardY = 185;
 
-  // Card 1: Fornecedor
   doc.setFillColor(248, 250, 252);
   doc.roundedRect(15, cardY, 90, 24, 2, 2, 'F');
   doc.setTextColor(100, 116, 139);
@@ -830,7 +957,6 @@ function downloadScannedQRPDF(qrId, filename, qrDataEncoded) {
   doc.setFont(undefined, 'bold');
   doc.text(qrData.supplier, 20, cardY + 16);
 
-  // Card 2: NF
   doc.setFillColor(248, 250, 252);
   doc.roundedRect(105, cardY, 90, 24, 2, 2, 'F');
   doc.setTextColor(100, 116, 139);
@@ -844,7 +970,6 @@ function downloadScannedQRPDF(qrId, filename, qrDataEncoded) {
 
   cardY += 30;
 
-  // Card 3: Matéria-Prima
   doc.setFillColor(248, 250, 252);
   doc.roundedRect(15, cardY, 90, 24, 2, 2, 'F');
   doc.setTextColor(100, 116, 139);
@@ -856,7 +981,6 @@ function downloadScannedQRPDF(qrId, filename, qrDataEncoded) {
   doc.setFont(undefined, 'bold');
   doc.text(qrData.material, 20, cardY + 16);
 
-  // Card 4: IF Value (destaque especial)
   doc.setFillColor(59, 130, 246);
   doc.roundedRect(105, cardY, 90, 24, 2, 2, 'F');
   doc.setTextColor(255, 255, 255);
@@ -867,7 +991,6 @@ function downloadScannedQRPDF(qrId, filename, qrDataEncoded) {
   doc.setFont(undefined, 'bold');
   doc.text(qrData.ifValue.toFixed(2), 110, cardY + 16);
 
-  // Rodapé
   doc.setTextColor(150, 150, 150);
   doc.setFontSize(8);
   doc.setFont(undefined, 'normal');
@@ -878,8 +1001,30 @@ function downloadScannedQRPDF(qrId, filename, qrDataEncoded) {
   toast('PDF gerado!');
 }
 
-// LOAD DETAIL
-function openLoad(id) {
+// ==================== MATERIALS TAB ====================
+function renderMaterials() {
+  const mc = document.getElementById('mainContent');
+  const entries = Object.entries(materials);
+  mc.innerHTML = `
+    <h1 style="font-size:20px;font-weight:700;margin-bottom:20px"><i class="fa-solid fa-flask" style="color:#3b82f6;margin-right:8px"></i>Matérias-Primas</h1>
+    ${entries.length === 0 ? '<div class="card" style="text-align:center;color:#94a3b8;padding:32px"><i class="fa-solid fa-inbox" style="font-size:40px;margin-bottom:12px;display:block"></i><p>Nenhuma matéria-prima cadastrada</p></div>' :
+      entries.map(([id, m]) => `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+        <div style="flex:1">
+          <strong style="font-size:14px;display:block;margin-bottom:6px">${m.name}</strong>
+          <div style="font-size:12px;color:#94a3b8"><i class="fa-solid fa-gauge" style="margin-right:4px;width:12px"></i>Faixa IF: ${m.ifMin} — ${m.ifMax} g/10min</div>
+        </div>
+        <button class="btn-danger btn-sm" onclick="deleteMaterial('${id}')"><i class="fa-solid fa-trash"></i></button>
+      </div>`).join('')}
+  `;
+  document.querySelectorAll('.fab').forEach(f => f.remove());
+  const fab = document.createElement('button');
+  fab.className = 'fab';
+  fab.innerHTML = '<i class="fa-solid fa-plus"></i>';
+  fab.onclick = () => showNewMaterialModal();
+  document.body.appendChild(fab);
+}
+// ==================== LOAD DETAIL ====================
+function openLoadDetail(id) {
   currentLoadId = id;
   renderLoadDetail();
 }
@@ -913,8 +1058,8 @@ function renderLoadDetail() {
       const h = (p.ifValue / maxVal) * 100;
       const ok = mat && p.ifValue >= mat.ifMin && p.ifValue <= mat.ifMax;
       return `<div class="chart-bar" style="height:${h}%;background:${ok ? '#22c55e' : '#ef4444'};border-radius:4px 4px 0 0">
-              <div class="chart-bar-label">P${i + 1}</div>
-            </div>`;
+                    <div class="chart-bar-label">P${i + 1}</div>
+                  </div>`;
     }).join('')}
         </div>
       </div>
@@ -953,7 +1098,7 @@ function renderLoadDetail() {
     
     <div style="display:flex;gap:10px;margin-bottom:12px">
       <button class="btn-primary" style="flex:1;background:#3b82f6;padding:10px;border-radius:6px;border:none;color:#f1f5f9;cursor:pointer;font-size:13px;font-weight:600" onclick="showEditLoadModal('${id}')"><i class="fa-solid fa-edit" style="margin-right:6px"></i>Editar</button>
-      <button class="btn-primary" style="flex:1;background:#3b82f6;padding:10px;border-radius:6px;border:none;color:#f1f5f9;cursor:pointer;font-size:13px;font-weight:600" onclick="generatePDF('${id}')"><i class="fa-solid fa-download" style="margin-right:6px"></i>PDF</button>
+      <button class="btn-primary" style="flex:1;background:#3b82f6;padding:10px;border-radius:6px;border:none;color:#f1f5f9;cursor:pointer;font-size:13px;font-weight:600" onclick="generatePDFLoad('${id}')"><i class="fa-solid fa-download" style="margin-right:6px"></i>PDF</button>
     </div>
     
     ${chartHTML}
@@ -962,19 +1107,19 @@ function renderLoadDetail() {
     ${paletes.length === 0 ? '<div class="card" style="text-align:center;color:#94a3b8;padding:24px"><i class="fa-solid fa-inbox" style="font-size:32px;margin-bottom:8px;display:block"></i>Nenhum palete. Toque + para adicionar.</div>' :
       paletes.map(([pid, p], i) => {
         const ok = mat && p.ifValue >= mat.ifMin && p.ifValue <= mat.ifMax;
-        return `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px">
+        return `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;cursor:pointer;transition:all 0.3s" onmouseover="this.style.background='#1e293b'" onmouseout="this.style.background='#0f172a'" onclick="showEditPaleteModal('${id}','${pid}',${i + 1})">
           <div style="flex:1">
             <strong style="font-size:13px">Palete ${i + 1}</strong>
             <div style="font-size:11px;color:#94a3b8;margin-top:4px"><i class="fa-solid fa-calendar" style="margin-right:4px;width:12px"></i>${formatDate(p.date)} · IF: ${p.ifValue.toFixed(2)} g/10min</div>
           </div>
           <div style="display:flex;gap:8px;align-items:center">
             <span class="badge ${ok ? 'badge-success' : 'badge-danger'}" style="font-weight:600">${ok ? '✓ OK' : '✗ Fora'}</span>
-            <button class="btn-danger btn-sm" onclick="deletePalete('${id}','${pid}')"><i class="fa-solid fa-trash"></i></button>
+            <button class="btn-danger btn-sm" style="padding:6px 8px;background:#ef4444;border:none;border-radius:4px;color:#f1f5f9;cursor:pointer" onclick="event.stopPropagation();deletePaleteItem('${id}','${pid}')"><i class="fa-solid fa-trash"></i></button>
           </div>
         </div>`;
       }).join('')}
     
-    <button class="btn-danger" style="width:100%;margin-top:16px;padding:10px;border-radius:6px;border:none;background:#ef4444;color:#f1f5f9;cursor:pointer;font-size:13px;font-weight:600" onclick="deleteLoad('${id}')"><i class="fa-solid fa-trash" style="margin-right:6px"></i>Excluir Carregamento</button>
+    <button class="btn-danger" style="width:100%;margin-top:16px;padding:10px;border-radius:6px;border:none;background:#ef4444;color:#f1f5f9;cursor:pointer;font-size:13px;font-weight:600" onclick="deleteLoadItem('${id}')"><i class="fa-solid fa-trash" style="margin-right:6px"></i>Excluir Carregamento</button>
   `;
   document.querySelectorAll('.fab').forEach(f => f.remove());
   const fab = document.createElement('button');
@@ -984,8 +1129,11 @@ function renderLoadDetail() {
   document.body.appendChild(fab);
 }
 
-// MODALS
-function closeModal() { document.querySelectorAll('.modal-overlay').forEach(m => m.remove()); window.removeEventListener('resize', handleViewportChange); }
+// ==================== MODALS ====================
+function closeModal() {
+  document.querySelectorAll('.modal-overlay').forEach(m => m.remove());
+  window.removeEventListener('resize', handleViewportChange);
+}
 
 function handleViewportChange() {
   const overlay = document.querySelector('.modal-overlay');
@@ -1138,7 +1286,84 @@ function showNewPaleteModal(loadId) {
   };
 }
 
-// DELETE
+function showBulkPaleteModal(loadId) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+  overlay.innerHTML = `<div class="modal-content">
+    <h2 style="font-size:18px;font-weight:700;margin-bottom:16px"><i class="fa-solid fa-cubes" style="color:#3b82f6;margin-right:8px"></i>Gerar Paletes para QR Code</h2>
+    <form id="bulkPaleteForm" style="display:flex;flex-direction:column;gap:12px">
+      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Data da Análise</label><input class="input-field" id="bulkPalDate" type="date" required></div>
+      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Quantidade de Paletes</label><input class="input-field" id="bulkPalCount" type="number" min="1" max="100" required placeholder="5" value="5"></div>
+      <div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px">
+        <div style="font-size:11px;color:#94a3b8"><i class="fa-solid fa-info-circle" style="margin-right:6px;color:#3b82f6"></i>Os paletes serão criados SEM Índice de Fluidez. Você poderá adicionar os valores depois clicando em cada palete.</div>
+      </div>
+      <button type="submit" class="btn-primary" style="width:100%;padding:10px;background:#22c55e;border:none;border-radius:6px;color:#f1f5f9;font-weight:600;cursor:pointer;margin-top:8px"><i class="fa-solid fa-plus" style="margin-right:6px"></i>Gerar Paletes</button>
+    </form>
+  </div>`;
+  document.body.appendChild(overlay);
+  window.addEventListener('resize', handleViewportChange);
+  handleViewportChange();
+  document.getElementById('bulkPalDate').valueAsDate = new Date();
+
+  document.getElementById('bulkPaleteForm').onsubmit = async e => {
+    e.preventDefault();
+    const date = document.getElementById('bulkPalDate').value;
+    const quantity = parseInt(document.getElementById('bulkPalCount').value);
+
+    if (!date || isNaN(quantity) || quantity < 1) { 
+      toast('Preencha todos os campos corretamente', true); 
+      return; 
+    }
+
+    let addedCount = 0;
+    for (let i = 0; i < quantity; i++) {
+      try {
+        await new Promise((resolve) => {
+          db.ref('loads/' + loadId + '/paletes').push({ date, ifValue: 0 }, (err) => {
+            if (!err) addedCount++;
+            resolve();
+          });
+        });
+      } catch (err) { }
+    }
+
+    toast(`${addedCount} palete(s) gerado(s)! Clique em cada um para adicionar o Índice de Fluidez.`);
+    closeModal();
+  };
+}
+
+function showEditPaleteModal(loadId, paleteId, paleteNum) {
+  const palete = loads[loadId].paletes[paleteId];
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+  overlay.innerHTML = `<div class="modal-content">
+    <h2 style="font-size:18px;font-weight:700;margin-bottom:16px"><i class="fa-solid fa-edit" style="color:#3b82f6;margin-right:8px"></i>Editar Palete ${paleteNum}</h2>
+    <form id="editPaleteForm" style="display:flex;flex-direction:column;gap:12px">
+      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Data da Análise</label><input class="input-field" id="editPalDate" type="date" required value="${palete.date}"></div>
+      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Valor IF (g/10min)</label><input class="input-field" id="editPalIF" type="number" step="0.01" required placeholder="0.00" value="${palete.ifValue}"></div>
+      <button type="submit" class="btn-primary" style="width:100%;padding:10px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;font-weight:600;cursor:pointer;margin-top:8px">Salvar Palete</button>
+    </form>
+  </div>`;
+  document.body.appendChild(overlay);
+  window.addEventListener('resize', handleViewportChange);
+  handleViewportChange();
+  
+  document.getElementById('editPaleteForm').onsubmit = e => {
+    e.preventDefault();
+    const date = document.getElementById('editPalDate').value;
+    const ifValue = parseFloat(document.getElementById('editPalIF').value);
+    if (!date || isNaN(ifValue)) { toast('Preencha todos os campos', true); return; }
+    db.ref('loads/' + loadId + '/paletes/' + paleteId).update({ date, ifValue });
+    toast('Palete atualizado!');
+    closeModal();
+  };
+}
+
+
+
+// ==================== DELETE FUNCTIONS ====================
 function deleteMaterial(id) {
   const card = event.target.closest('.card');
   if (card.querySelector('.confirm-row')) return;
@@ -1151,20 +1376,20 @@ function deleteMaterial(id) {
   card.appendChild(row);
 }
 
-function deleteLoad(id) {
+function deleteLoadItem(id) {
   db.ref('loads/' + id).remove();
   toast('Carregamento excluído!');
   currentLoadId = null;
   renderCurrentTab();
 }
 
-function deletePalete(loadId, paleteId) {
+function deletePaleteItem(loadId, paleteId) {
   db.ref('loads/' + loadId + '/paletes/' + paleteId).remove();
   toast('Palete removido!');
 }
 
-// PDF
-function generatePDF(id) {
+// ==================== PDF GENERATION ====================
+function generatePDFLoad(id) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF();
   const l = loads[id];
@@ -1174,7 +1399,6 @@ function generatePDF(id) {
   const s = getLoadStats(l);
   const status = s.total === 0 ? 'PENDENTE' : s.pct >= 80 ? 'APROVADO' : 'REPROVADO';
 
-  // Header
   doc.setFillColor(15, 23, 42);
   doc.rect(0, 0, 210, 50, 'F');
   doc.setTextColor(241, 245, 249);
@@ -1187,7 +1411,6 @@ function generatePDF(id) {
   doc.setFontSize(9);
   doc.text('Gerado em: ' + new Date().toLocaleString('pt-BR'), 14, 45);
 
-  // Info
   doc.setTextColor(30, 41, 59);
   let y = 58;
   doc.setFontSize(12);
@@ -1211,7 +1434,6 @@ function generatePDF(id) {
     y += 6;
   });
 
-  // Summary
   y += 10;
   doc.setFillColor(s.pct >= 80 ? 230 : 254, s.pct >= 80 ? 255 : 226, s.pct >= 80 ? 230 : 226);
   doc.roundedRect(14, y, 182, 24, 3, 3, 'F');
@@ -1225,6 +1447,15 @@ function generatePDF(id) {
 
   doc.save(`Relatorio_NF${l.invoiceNumber}_${l.supplier}.pdf`);
   toast('PDF gerado!');
+}
+
+function generateAllReports() {
+  const allLoads = Object.entries(loads);
+  if (allLoads.length === 0) { toast('Nenhum carregamento', true); return; }
+  allLoads.forEach(([id]) => {
+    setTimeout(() => generatePDFLoad(id), 500);
+  });
+  toast('Gerando ' + allLoads.length + ' relatório(s)...');
 }
 
 // Initial render
