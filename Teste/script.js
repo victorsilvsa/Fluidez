@@ -138,36 +138,69 @@ function renderHome() {
   const mc = document.getElementById('mainContent');
   const allLoads = Object.values(loads);
   let totalPaletes = 0, totalApproved = 0, totalRejected = 0;
-  allLoads.forEach(l => { const s = getLoadStats(l); totalPaletes += s.total; totalApproved += s.approved; totalRejected += s.rejected; });
+  allLoads.forEach(l => { 
+    const s = getLoadStats(l); 
+    totalPaletes += s.total; 
+    totalApproved += s.approved; 
+    totalRejected += s.rejected; 
+  });
 
-  const recentLoads = sortLoadsByDate(Object.entries(loads)).slice(0, 5);
+  const recentLoads = sortLoadsByDate(Object.entries(loads)).slice(0, 6);
 
   mc.innerHTML = `
-    <h1 style="font-size:24px;font-weight:700;margin-bottom:20px"><i class="fa-solid fa-chart-line" style="color:#3b82f6;margin-right:10px"></i>${appTitle}</h1>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px">
-      <div class="stat-card"><div class="stat-val">${allLoads.length}</div><div class="stat-label">Carregamentos</div></div>
-      <div class="stat-card"><div class="stat-val">${totalPaletes}</div><div class="stat-label">Paletes</div></div>
-      <div class="stat-card"><div class="stat-val" style="color:#22c55e">${totalApproved}</div><div class="stat-label">Aprovados</div></div>
-      <div class="stat-card"><div class="stat-val" style="color:#ef4444">${totalRejected}</div><div class="stat-label">Reprovados</div></div>
+    <div style="padding:0">
+      <h1 style="font-size:24px;font-weight:700;margin-bottom:24px"><i class="fa-solid fa-chart-line" style="color:#3b82f6;margin-right:10px"></i>${appTitle}</h1>
+      
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:24px">
+        <div class="stat-card">
+          <div class="stat-val">${allLoads.length}</div>
+          <div class="stat-label">Carregamentos</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-val">${totalPaletes}</div>
+          <div class="stat-label">Paletes</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-val" style="color:#22c55e">${totalApproved}</div>
+          <div class="stat-label">Aprovados</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-val" style="color:#ef4444">${totalRejected}</div>
+          <div class="stat-label">Reprovados</div>
+        </div>
+      </div>
+
+      <h2 style="font-size:14px;font-weight:700;margin-bottom:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.5px">Recentes</h2>
+      
+      ${recentLoads.length === 0 ? 
+        `<div class="card" style="text-align:center;color:#94a3b8;padding:24px">
+          <i class="fa-solid fa-inbox" style="font-size:32px;margin-bottom:8px;display:block"></i>
+          <p>Sem carregamentos</p>
+        </div>` :
+        `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          ${recentLoads.map(([id, l]) => {
+            const s = getLoadStats(l);
+            const matName = materials[l.materialId]?.name || 'N/A';
+            const statusColor = s.total === 0 ? '#3b82f6' : s.pct >= 80 ? '#22c55e' : '#ef4444';
+            return `
+              <div class="card" style="cursor:pointer;padding:12px;transition:all 0.3s ease;border-left:4px solid ${statusColor}" 
+                   onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 16px rgba(59, 130, 246, 0.15)'" 
+                   onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 4px 6px rgba(0, 0, 0, 0.2)'" 
+                   onclick="openLoadDetail('${id}')">
+                <div style="font-size:12px;font-weight:700;color:#f1f5f9;margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${l.supplier}</div>
+                <div style="font-size:10px;color:#94a3b8;margin-bottom:2px"><i class="fa-solid fa-calendar" style="margin-right:3px;width:10px"></i>${formatDate(l.date)}</div>
+                <div style="font-size:10px;color:#94a3b8;margin-bottom:6px"><i class="fa-solid fa-flask" style="margin-right:3px;width:10px"></i>${matName}</div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                  <span style="font-size:11px;color:#64748b">${s.total} paletes</span>
+                  <span style="font-size:11px;font-weight:700;color:${statusColor}">${s.pct}%</span>
+                </div>
+                <div class="progress-bar" style="height:4px"><div class="progress-fill" style="width:${s.pct}%;background:${statusColor};transition:width 0.3s ease;height:100%"></div></div>
+              </div>
+            `;
+          }).join('')}
+        </div>`
+      }
     </div>
-    <h2 style="font-size:16px;font-weight:600;margin-bottom:12px;color:#94a3b8">Carregamentos Recentes</h2>
-    ${recentLoads.length === 0 ? '<div class="card" style="text-align:center;color:#94a3b8;padding:24px"><i class="fa-solid fa-inbox" style="font-size:32px;margin-bottom:8px;display:block"></i>Nenhum carregamento ainda</div>' :
-      recentLoads.map(([id, l]) => {
-        const s = getLoadStats(l);
-        const matName = materials[l.materialId]?.name || 'N/A';
-        return `<div class="card" style="cursor:pointer;transition:all 0.3s ease" onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 16px rgba(59, 130, 246, 0.15)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 4px 6px rgba(0, 0, 0, 0.2)'" onclick="openLoadDetail('${id}')">
-          <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px">
-            <div>
-              <div style="font-size:14px;font-weight:600;color:#f1f5f9">${l.supplier}</div>
-              <div style="font-size:12px;color:#94a3b8;margin-top:4px"><i class="fa-solid fa-calendar" style="margin-right:4px;width:12px"></i>${formatDate(l.date)}</div>
-              <div style="font-size:11px;color:#64748b;margin-top:3px">NF: ${l.invoiceNumber || 'N/A'} · Lote: ${l.lot}</div>
-            </div>
-            <span class="badge ${s.pct >= 80 ? 'badge-success' : s.pct === 0 ? 'badge-info' : 'badge-danger'}" style="font-weight:600">${s.pct}%</span>
-          </div>
-          <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">${matName} · ${s.total} paletes</div>
-          <div class="progress-bar"><div class="progress-fill" style="width:${s.pct}%;background:${s.pct >= 80 ? '#22c55e' : '#ef4444'};transition:width 0.3s ease"></div></div>
-        </div>`;
-      }).join('')}
   `;
 }
 
@@ -200,13 +233,12 @@ function renderLoads() {
   let html = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
       <h1 style="font-size:20px;font-weight:700"><i class="fa-solid fa-truck" style="color:#3b82f6;margin-right:8px"></i>Carregamentos</h1>
-      <button id="toggleAdvOpts" class="btn-secondary" style="padding:8px 12px;background:#334155;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600">
+      <button id="toggleAdvOpts" class="btn-secondary" style="padding:8px 12px;background:#334155;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600;transition:all 0.2s">
         <i class="fa-solid fa-sliders" style="margin-right:6px"></i>Opções
       </button>
     </div>
     
     <div id="advancedOptionsPanel" style="display:none;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px;margin-bottom:16px">
-      <div style="font-size:12px;color:#94a3b8;margin-bottom:8px;font-weight:600">FILTROS E AÇÕES</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
         <button class="btn-secondary" style="padding:8px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:11px;font-weight:600" onclick="generateAllQRPDFs()">
           <i class="fa-solid fa-qrcode" style="margin-right:4px"></i>QR Códigos
@@ -220,46 +252,48 @@ function renderLoads() {
 
   html += monthKeys.map(monthKey => {
     const group = grouped[monthKey];
-    return `
-      <div style="margin-bottom:20px">
-        <h3 style="font-size:13px;font-weight:700;color:#64748b;text-transform:capitalize;margin-bottom:12px;padding:0 12px;letter-spacing:0.5px">${group.name}</h3>
-        ${group.loads.map(([id, l]) => {
+    const loadsGrid = group.loads.map(([id, l]) => {
       const s = getLoadStats(l);
       const matName = materials[l.materialId]?.name || 'N/A';
-      const statusColor = s.total === 0 ? 'badge-info' : s.pct >= 80 ? 'badge-success' : 'badge-danger';
-      const statusText = s.total === 0 ? 'Pendente' : s.pct + '% OK';
+      const statusColor = s.total === 0 ? '#3b82f6' : s.pct >= 80 ? '#22c55e' : '#ef4444';
       return `
-            <div class="card" style="cursor:pointer;margin-bottom:10px;transition:all 0.3s ease" onmouseover="this.style.transform='translateX(4px)'" onmouseout="this.style.transform='translateX(0)'" onclick="openLoadDetail('${id}')">
-              <div style="display:flex;justify-content:space-between;align-items:start;gap:12px">
-                <div style="flex:1">
-                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                    <div style="width:4px;height:24px;background:${s.pct >= 80 ? '#22c55e' : '#ef4444'};border-radius:2px"></div>
-                    <strong style="font-size:14px">${l.supplier}</strong>
-                  </div>
-                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px;color:#94a3b8;margin-bottom:6px">
-                    <div><i class="fa-solid fa-calendar" style="margin-right:4px;width:12px"></i>${formatDate(l.date)}</div>
-                    <div><i class="fa-solid fa-file" style="margin-right:4px;width:12px"></i>NF: ${l.invoiceNumber || 'N/A'}</div>
-                    <div><i class="fa-solid fa-cube" style="margin-right:4px;width:12px"></i>Lote: ${l.lot}</div>
-                    <div><i class="fa-solid fa-flask" style="margin-right:4px;width:12px"></i>${matName}</div>
-                  </div>
-                  <div style="font-size:10px;color:#64748b"><i class="fa-solid fa-user" style="margin-right:4px;width:12px"></i>Resp: ${l.responsible}</div>
-                </div>
-                <div style="text-align:right">
-                  <span class="badge ${statusColor}" style="font-weight:600;white-space:nowrap">${statusText}</span>
-                  <div style="font-size:11px;color:#94a3b8;margin-top:6px">${s.total} paletes</div>
-                </div>
-              </div>
-              <div class="progress-bar" style="margin-top:10px"><div class="progress-fill" style="width:${s.pct}%;background:${s.pct >= 80 ? '#22c55e' : '#ef4444'};transition:width 0.3s ease"></div></div>
+        <div class="card" style="cursor:pointer;padding:12px;transition:all 0.3s ease;border-left:4px solid ${statusColor};display:flex;flex-direction:column;justify-content:space-between;height:100%" 
+             onmouseover="this.style.transform='translateX(4px)'" 
+             onmouseout="this.style.transform='translateX(0)'" 
+             onclick="openLoadDetail('${id}')">
+          <div>
+            <div style="font-size:12px;font-weight:700;color:#f1f5f9;margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${l.supplier}</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:10px;color:#94a3b8;margin-bottom:6px">
+              <div><i class="fa-solid fa-calendar" style="margin-right:3px;width:10px"></i>${formatDate(l.date)}</div>
+              <div><i class="fa-solid fa-file" style="margin-right:3px;width:10px"></i>NF: ${l.invoiceNumber || 'N/A'}</div>
+              <div><i class="fa-solid fa-cube" style="margin-right:3px;width:10px"></i>L: ${l.lot}</div>
+              <div><i class="fa-solid fa-flask" style="margin-right:3px;width:10px"></i>${matName}</div>
             </div>
-          `;
-    }).join('')}
+            <div style="font-size:9px;color:#64748b"><i class="fa-solid fa-user" style="margin-right:3px;width:10px"></i>${l.responsible}</div>
+          </div>
+          <div style="margin-top:8px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <span style="font-size:11px;color:#94a3b8">${s.total} paletes</span>
+              <span style="font-size:11px;font-weight:700;color:${statusColor}">${s.pct}%</span>
+            </div>
+            <div class="progress-bar" style="height:4px"><div class="progress-fill" style="width:${s.pct}%;background:${statusColor};transition:width 0.3s ease;height:100%"></div></div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <div style="margin-bottom:20px">
+        <h3 style="font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:12px;padding:0 8px;letter-spacing:0.5px">${group.name}</h3>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          ${loadsGrid}
+        </div>
       </div>
     `;
   }).join('');
 
   mc.innerHTML = html;
 
-  // Toggle Advanced Options
   document.getElementById('toggleAdvOpts').onclick = function () {
     const panel = document.getElementById('advancedOptionsPanel');
     UIState.showAdvancedOptions = !UIState.showAdvancedOptions;
@@ -281,37 +315,46 @@ function renderQRCode() {
   const entries = Object.entries(loads);
 
   mc.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
-      <h1 style="font-size:20px;font-weight:700"><i class="fa-solid fa-qrcode" style="color:#3b82f6;margin-right:8px"></i>Gerador de QR Codes</h1>
-      <button id="toggleQROptions" class="btn-secondary" style="padding:8px 12px;background:#334155;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h1 style="font-size:20px;font-weight:700"><i class="fa-solid fa-qrcode" style="color:#3b82f6;margin-right:8px"></i>QR Codes</h1>
+      <button id="toggleQROptions" class="btn-secondary" style="padding:8px 12px;background:#334155;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600;transition:all 0.2s">
         <i class="fa-solid fa-cog" style="margin-right:6px"></i>Ações
       </button>
     </div>
     
     <div id="qrOptionsPanel" style="display:none;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px;margin-bottom:16px">
-      <div style="font-size:12px;color:#94a3b8;margin-bottom:8px;font-weight:600">OPÇÕES RÁPIDAS</div>
-      <button class="btn-secondary" style="width:100%;padding:10px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600;margin-bottom:8px" onclick="generateAllQRPDFs()">
-        <i class="fa-solid fa-download" style="margin-right:6px"></i>Baixar Todos QR Codes em PDF
+      <button class="btn-secondary" style="width:100%;padding:10px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600" onclick="generateAllQRPDFs()">
+        <i class="fa-solid fa-download" style="margin-right:6px"></i>Baixar Todos em PDF
       </button>
     </div>
     
-    ${entries.length === 0 ? '<div class="card" style="text-align:center;color:#94a3b8;padding:32px"><i class="fa-solid fa-inbox" style="font-size:40px;margin-bottom:12px;display:block"></i><p>Nenhum carregamento para gerar QR Code</p></div>' :
-      entries.map(([id, l]) => {
-        const s = getLoadStats(l);
-        const matName = materials[l.materialId]?.name || 'N/A';
-        return `
-          <div class="card" style="cursor:pointer;margin-bottom:10px;transition:all 0.3s ease" onclick="openQRGenerator('${id}')">
-            <div style="display:flex;justify-content:space-between;align-items:start;gap:12px">
-              <div style="flex:1">
-                <strong style="font-size:14px;display:block;margin-bottom:6px">${l.supplier}</strong>
-                <div style="font-size:11px;color:#94a3b8"><i class="fa-solid fa-calendar" style="margin-right:4px;width:12px"></i>${formatDate(l.date)} · NF: ${l.invoiceNumber || 'N/A'}</div>
-                <div style="font-size:11px;color:#94a3b8;margin-top:4px"><i class="fa-solid fa-cube" style="margin-right:4px;width:12px"></i>Lote: ${l.lot} · ${matName}</div>
+    ${entries.length === 0 ? 
+      `<div class="card" style="text-align:center;color:#94a3b8;padding:32px">
+        <i class="fa-solid fa-inbox" style="font-size:40px;margin-bottom:12px;display:block"></i>
+        <p>Nenhum carregamento</p>
+      </div>` :
+      `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        ${entries.map(([id, l]) => {
+          const s = getLoadStats(l);
+          const matName = materials[l.materialId]?.name || 'N/A';
+          const statusColor = s.total === 0 ? '#3b82f6' : s.pct >= 80 ? '#22c55e' : '#ef4444';
+          return `
+            <div class="card" style="cursor:pointer;padding:12px;transition:all 0.3s ease;border-left:4px solid ${statusColor}" 
+                 onmouseover="this.style.transform='translateY(-2px)'" 
+                 onmouseout="this.style.transform='translateY(0)'" 
+                 onclick="openQRGenerator('${id}')">
+              <div style="font-size:12px;font-weight:700;color:#f1f5f9;margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${l.supplier}</div>
+              <div style="font-size:10px;color:#94a3b8;margin-bottom:2px"><i class="fa-solid fa-calendar" style="margin-right:3px;width:10px"></i>${formatDate(l.date)}</div>
+              <div style="font-size:10px;color:#94a3b8;margin-bottom:6px"><i class="fa-solid fa-file" style="margin-right:3px;width:10px"></i>NF: ${l.invoiceNumber || 'N/A'}</div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="font-size:11px;color:#64748b">${s.total} paletes</span>
+                <span style="font-size:11px;font-weight:700;color:${statusColor}">${s.pct}%</span>
               </div>
-              <span class="badge badge-info" style="font-weight:600">${s.total} paletes</span>
             </div>
-          </div>
-        `;
-      }).join('')}
+          `;
+        }).join('')}
+      </div>`
+    }
   `;
 
   document.getElementById('toggleQROptions').onclick = function () {
@@ -323,6 +366,7 @@ function renderQRCode() {
 
   document.querySelectorAll('.fab').forEach(f => f.remove());
 }
+
 
 function openQRGenerator(loadId) {
   currentLoadId = loadId;
