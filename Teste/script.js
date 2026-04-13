@@ -632,8 +632,7 @@ function generateQRPDFLoad(loadId) {
       doc.setFontSize(12);
       doc.text('Tipo: ' + matName, 15, 238);
       doc.text('Data de Chegada: ' + formatDate(p.date), 15, 252);
-      doc.text('IF Value: ' + p.ifValue.toFixed(2) + ' g/10min', 15, 266);
-
+   
       doc.setFontSize(8);
       doc.setTextColor(150, 160, 170);
       doc.text('EMBALAGENS TATUÍ', 15, 290);
@@ -986,7 +985,6 @@ function downloadScannedQRPDF(qrId, filename, qrDataEncoded) {
   doc.setTextColor(255, 255, 255);
   doc.setFontSize(8);
   doc.setFont(undefined, 'bold');
-  doc.text('IF VALUE (g/10min)', 110, cardY + 6);
   doc.setFontSize(13);
   doc.setFont(undefined, 'bold');
   doc.text(qrData.ifValue.toFixed(2), 110, cardY + 16);
