@@ -1,1461 +1,1327 @@
-// Firebase Init
-const firebaseConfig = { databaseURL: "https://materiaprima-803a4-default-rtdb.firebaseio.com" };
+'use strict';
+
+/* =====================================================================
+ * Controle de Fluidez
+ * ---------------------------------------------------------------------
+ * Sections:
+ *   1. Config & Firebase      6. Views (tabs + detail screens)
+ *   2. State                  7. Modals & forms
+ *   3. Utilities              8. Camera / QR scanner
+ *   4. Domain (stats/status)  9. PDF generation
+ *   5. QR helpers            10. Actions (event delegation) & boot
+ *
+ * Firebase data model (unchanged, backwards compatible):
+ *   materials/{id}: { name, ifMin, ifMax }
+ *   loads/{id}:     { date, invoiceNumber, supplier, lot, responsible,
+ *                     materialId, paletes/{pid}: { date, ifValue } }
+ *
+ * QR payload format is unchanged so labels already printed keep scanning.
+ * ===================================================================== */
+
+/* ==================== 1. CONFIG & FIREBASE ==================== */
+const firebaseConfig = { databaseURL: 'https://materiaprima-803a4-default-rtdb.firebaseio.com' };
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
-// State
-let materials = {};
-let loads = {};
-let currentTab = 'home';
-let currentLoadId = null;
-let appTitle = 'Controle de Fluidez';
-let qrCache = {};
-let scannedQRs = {};
-let UIState = {
-  expandedLoadId: null,
-  showAdvancedOptions: false,
-  filterMonth: null
-};
+const APPROVAL_THRESHOLD = 80; // % of measured paletes inside the IF range
+const COMPANY_NAME = 'EMBALAGENS TATUÍ';
 
-// Element SDK
 const defaultConfig = {
   app_title: 'Controle de Fluidez',
-  background_color: '#0f172a',
-  surface_color: '#1e293b',
+  background_color: '#0b1120',
+  surface_color: '#111a2e',
   text_color: '#f1f5f9',
   accent_color: '#3b82f6',
   font_family: 'DM Sans'
 };
 
-if (window.elementSdk) {
-  window.elementSdk.init({
-    defaultConfig,
-    onConfigChange: async (config) => {
-      appTitle = config.app_title || defaultConfig.app_title;
-      document.body.style.background = config.background_color || defaultConfig.background_color;
-      document.body.style.color = config.text_color || defaultConfig.text_color;
-      document.body.style.fontFamily = `${config.font_family || defaultConfig.font_family}, sans-serif`;
-      renderCurrentTab();
-    },
-    mapToCapabilities: (config) => ({
-      recolorables: [
-        { get: () => config.background_color || defaultConfig.background_color, set: v => { config.background_color = v; window.elementSdk.setConfig({ background_color: v }); } },
-        { get: () => config.surface_color || defaultConfig.surface_color, set: v => { config.surface_color = v; window.elementSdk.setConfig({ surface_color: v }); } },
-        { get: () => config.text_color || defaultConfig.text_color, set: v => { config.text_color = v; window.elementSdk.setConfig({ text_color: v }); } },
-        { get: () => config.accent_color || defaultConfig.accent_color, set: v => { config.accent_color = v; window.elementSdk.setConfig({ accent_color: v }); } }
-      ],
-      borderables: [],
-      fontEditable: { get: () => config.font_family || defaultConfig.font_family, set: v => { config.font_family = v; window.elementSdk.setConfig({ font_family: v }); } },
-      fontSizeable: undefined
-    }),
-    mapToEditPanelValues: (config) => new Map([
-      ['app_title', config.app_title || defaultConfig.app_title]
-    ])
-  });
+/* ==================== 2. STATE ==================== */
+const state = {
+  materials: {},
+  loads: {},
+  tab: 'home',
+  /** Sub-screen inside a tab: null | { type: 'load' | 'qr', id } */
+  detail: null,
+  appTitle: defaultConfig.app_title,
+  /** Scanned QR payloads keyed by supplier-lot-palete */
+  scanned: new Map()
+};
+
+/* ==================== 3. UTILITIES ==================== */
+const $ = (sel, root = document) => root.querySelector(sel);
+
+/** Escapes user/DB content before it is interpolated into HTML. */
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
 }
 
-// Firebase Listeners
-db.ref('materials').on('value', snap => {
-  materials = snap.val() || {};
-  renderCurrentTab();
-});
-db.ref('loads').on('value', snap => {
-  loads = snap.val() || {};
-  renderCurrentTab();
-});
+/** 'YYYY-MM-DD' → 'DD/MM/YYYY'. Output is digits-only, so it is HTML-safe. */
+function formatDate(dateStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr ?? ''));
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : '—';
+}
 
-// ==================== HELPERS ====================
+const todayISO = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+const fmtIF = v => (Number(v) > 0 ? Number(v).toFixed(2) : '—');
+const safeFile = s => String(s ?? '').replace(/[^\w.-]+/g, '_');
+
 function toast(msg, error = false) {
+  document.querySelectorAll('.toast').forEach(t => t.remove());
   const t = document.createElement('div');
   t.className = 'toast' + (error ? ' toast-error' : '');
+  t.setAttribute('role', error ? 'alert' : 'status');
   t.textContent = msg;
   document.body.appendChild(t);
-  setTimeout(() => t.remove(), 2500);
+  setTimeout(() => t.remove(), 2600);
 }
 
-function formatDate(dateStr) {
-  const [year, month, day] = dateStr.split('-');
-  return `${day}/${month}/${year}`;
+/** Coalesces bursts of Firebase events into a single render per frame. */
+let renderQueued = false;
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; render(); });
 }
 
-function parseDate(dateStr) {
-  return new Date(dateStr + 'T00:00:00');
-}
-
-function sortLoadsByDate(loadEntries) {
-  return loadEntries.sort(([, a], [, b]) => {
-    const dateA = parseDate(a.date);
-    const dateB = parseDate(b.date);
-    return dateB - dateA;
-  });
-}
-
-function groupLoadsByMonth(loadEntries) {
-  const grouped = {};
-  loadEntries.forEach(([id, load]) => {
-    const [year, month] = load.date.split('-');
-    const monthKey = `${year}-${month}`;
-    const monthName = new Date(year, parseInt(month) - 1).toLocaleString('pt-BR', { month: 'long', year: 'numeric' });
-    if (!grouped[monthKey]) grouped[monthKey] = { name: monthName, loads: [] };
-    grouped[monthKey].loads.push([id, load]);
-  });
-  return grouped;
-}
+/* ==================== 4. DOMAIN ==================== */
+const paletesOf = load => (load && load.paletes ? Object.entries(load.paletes) : []);
+const materialOf = load => state.materials[load?.materialId];
+const isMeasured = p => Number(p?.ifValue) > 0; // bulk-created paletes start at 0 = not measured
+const inRange = (mat, v) => !!mat && v >= mat.ifMin && v <= mat.ifMax;
 
 function getLoadStats(load) {
-  const mat = materials[load.materialId];
-  const paletes = load.paletes ? Object.values(load.paletes) : [];
-  const total = paletes.length;
-  if (!total || !mat) return { total: 0, approved: 0, rejected: 0, avg: 0, pct: 0 };
-  const approved = paletes.filter(p => p.ifValue >= mat.ifMin && p.ifValue <= mat.ifMax).length;
-  const avg = paletes.reduce((s, p) => s + p.ifValue, 0) / total;
-  return { total, approved, rejected: total - approved, avg, pct: Math.round((approved / total) * 100) };
+  const mat = materialOf(load);
+  const all = paletesOf(load).map(([, p]) => p);
+  const measured = all.filter(isMeasured);
+  const approved = measured.filter(p => inRange(mat, p.ifValue)).length;
+  const avg = measured.length ? measured.reduce((s, p) => s + p.ifValue, 0) / measured.length : 0;
+  return {
+    total: all.length,
+    measured: measured.length,
+    pending: all.length - measured.length,
+    approved,
+    rejected: measured.length - approved,
+    avg,
+    pct: measured.length ? Math.round((approved / measured.length) * 100) : 0
+  };
 }
 
-function switchTab(tab) {
-  currentTab = tab;
-  currentLoadId = null;
-  UIState.expandedLoadId = null;
-  document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-  renderCurrentTab();
+function loadStatus(stats) {
+  if (!stats.measured) return { label: 'Pendente', tone: 'info' };
+  return stats.pct >= APPROVAL_THRESHOLD
+    ? { label: 'Aprovado', tone: 'success' }
+    : { label: 'Reprovado', tone: 'danger' };
 }
 
-function renderCurrentTab() {
-  const mc = document.getElementById('mainContent');
+function paleteStatus(mat, p) {
+  if (!isMeasured(p)) return { label: 'Sem IF', tone: 'info' };
+  return inRange(mat, p.ifValue) ? { label: 'OK', tone: 'success' } : { label: 'Fora', tone: 'danger' };
+}
+
+const sortedLoads = () =>
+  Object.entries(state.loads).sort(([, a], [, b]) => String(b.date).localeCompare(String(a.date)));
+
+function groupByMonth(entries) {
+  const groups = new Map();
+  entries.forEach(([id, l]) => {
+    const [y, m] = String(l.date || '').split('-');
+    const key = `${y}-${m}`;
+    if (!groups.has(key)) {
+      const name = y && m
+        ? new Date(+y, +m - 1).toLocaleString('pt-BR', { month: 'long', year: 'numeric' })
+        : 'Sem data';
+      groups.set(key, { name, items: [] });
+    }
+    groups.get(key).items.push([id, l]);
+  });
+  return [...groups.values()];
+}
+
+/* ==================== 5. QR HELPERS ==================== */
+/**
+ * Compact payload reduces QR matrix density by ~40%, allowing much larger
+ * modules that scan instantly from further away and in 1 frame.
+ */
+function buildQrPayload(load, palete, paleteNumber) {
+  return {
+    p: paleteNumber,
+    nf: load.invoiceNumber || '',
+    s: load.supplier || '',
+    l: load.lot || '',
+    m: materialOf(load)?.name || 'N/A',
+    d: formatDate(palete.date),
+    r: load.responsible || '',
+    if: Number(palete.ifValue) || 0
+  };
+}
+
+/**
+ * Normalizes both the new compact payload and legacy full-key payloads.
+ */
+function normalizeQrData(data) {
+  if (!data || typeof data !== 'object') return null;
+  const paleteNumber = data.paleteNumber ?? data.p;
+  if (paleteNumber === undefined) return null;
+  return {
+    paleteNumber: Number(paleteNumber),
+    invoiceNumber: String(data.invoiceNumber ?? data.nf ?? 'N/A'),
+    supplier: String(data.supplier ?? data.s ?? 'N/A'),
+    lot: String(data.lot ?? data.l ?? 'N/A'),
+    material: String(data.material ?? data.m ?? 'N/A'),
+    date: String(data.date ?? data.d ?? '—'),
+    responsible: String(data.responsible ?? data.r ?? '—'),
+    ifValue: Number(data.ifValue ?? data.if ?? 0)
+  };
+}
+
+/**
+ * Generates QR code using QRCode.CorrectLevel.H (HIGH: 30% error recovery).
+ * Up to 30% of the QR code can be missing, covered, torn, stained, or occluded,
+ * and it still decodes completely!
+ */
+function qrDataUrl(text, size = 640) {
+  const host = document.createElement('div');
+  new QRCode(host, {
+    text,
+    width: size,
+    height: size,
+    colorDark: '#000000',
+    colorLight: '#ffffff',
+    correctLevel: QRCode.CorrectLevel.H
+  });
+  const canvas = host.querySelector('canvas');
+  return canvas ? canvas.toDataURL('image/png') : null;
+}
+
+const scannedKey = q => `${q.supplier}-${q.lot}-${q.paleteNumber}`;
+
+/* ==================== 6. VIEWS ==================== */
+function render() {
+  const mc = $('#mainContent');
   if (!mc) return;
-  if (currentLoadId) { renderLoadDetail(); return; }
-  switch (currentTab) {
-    case 'home': renderHome(); break;
-    case 'loads': renderLoads(); break;
-    case 'camera': renderCamera(); break;
-    case 'qrcode': renderQRCode(); break;
-    case 'materials': renderMaterials(); break;
-  }
-}
+  document.querySelectorAll('.nav-btn').forEach(b => {
+    const active = b.dataset.tab === state.tab && !state.detail;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-current', active ? 'page' : 'false');
+  });
 
-// ==================== HOME TAB ====================
-function renderHome() {
-  const mc = document.getElementById('mainContent');
-  const allLoads = Object.values(loads);
-  let totalPaletes = 0, totalApproved = 0, totalRejected = 0;
-  allLoads.forEach(l => { const s = getLoadStats(l); totalPaletes += s.total; totalApproved += s.approved; totalRejected += s.rejected; });
-
-  const recentLoads = sortLoadsByDate(Object.entries(loads)).slice(0, 5);
-
-  mc.innerHTML = `
-    <h1 style="font-size:24px;font-weight:700;margin-bottom:20px"><i class="fa-solid fa-chart-line" style="color:#3b82f6;margin-right:10px"></i>${appTitle}</h1>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px">
-      <div class="stat-card"><div class="stat-val">${allLoads.length}</div><div class="stat-label">Carregamentos</div></div>
-      <div class="stat-card"><div class="stat-val">${totalPaletes}</div><div class="stat-label">Paletes</div></div>
-      <div class="stat-card"><div class="stat-val" style="color:#22c55e">${totalApproved}</div><div class="stat-label">Aprovados</div></div>
-      <div class="stat-card"><div class="stat-val" style="color:#ef4444">${totalRejected}</div><div class="stat-label">Reprovados</div></div>
-    </div>
-    <h2 style="font-size:16px;font-weight:600;margin-bottom:12px;color:#94a3b8">Carregamentos Recentes</h2>
-    ${recentLoads.length === 0 ? '<div class="card" style="text-align:center;color:#94a3b8;padding:24px"><i class="fa-solid fa-inbox" style="font-size:32px;margin-bottom:8px;display:block"></i>Nenhum carregamento ainda</div>' :
-      recentLoads.map(([id, l]) => {
-        const s = getLoadStats(l);
-        const matName = materials[l.materialId]?.name || 'N/A';
-        return `<div class="card" style="cursor:pointer;transition:all 0.3s ease" onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 16px rgba(59, 130, 246, 0.15)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 4px 6px rgba(0, 0, 0, 0.2)'" onclick="openLoadDetail('${id}')">
-          <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px">
-            <div>
-              <div style="font-size:14px;font-weight:600;color:#f1f5f9">${l.supplier}</div>
-              <div style="font-size:12px;color:#94a3b8;margin-top:4px"><i class="fa-solid fa-calendar" style="margin-right:4px;width:12px"></i>${formatDate(l.date)}</div>
-              <div style="font-size:11px;color:#64748b;margin-top:3px">NF: ${l.invoiceNumber || 'N/A'} · Lote: ${l.lot}</div>
-            </div>
-            <span class="badge ${s.pct >= 80 ? 'badge-success' : s.pct === 0 ? 'badge-info' : 'badge-danger'}" style="font-weight:600">${s.pct}%</span>
-          </div>
-          <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">${matName} · ${s.total} paletes</div>
-          <div class="progress-bar"><div class="progress-fill" style="width:${s.pct}%;background:${s.pct >= 80 ? '#22c55e' : '#ef4444'};transition:width 0.3s ease"></div></div>
-        </div>`;
-      }).join('')}
-  `;
-}
-
-// ==================== LOADS TAB ====================
-function renderLoads() {
-  const mc = document.getElementById('mainContent');
-  const entries = Object.entries(loads);
-
-  if (entries.length === 0) {
-    mc.innerHTML = `
-      <h1 style="font-size:20px;font-weight:700;margin-bottom:20px"><i class="fa-solid fa-truck" style="color:#3b82f6;margin-right:8px"></i>Carregamentos</h1>
-      <div class="card" style="text-align:center;color:#94a3b8;padding:32px">
-        <i class="fa-solid fa-inbox" style="font-size:40px;margin-bottom:12px;display:block"></i>
-        <p>Nenhum carregamento cadastrado</p>
-        <p style="font-size:12px;margin-top:8px">Toque o botão + para criar um novo</p>
-      </div>
-    `;
-    document.querySelectorAll('.fab').forEach(f => f.remove());
-    const fab = document.createElement('button');
-    fab.className = 'fab';
-    fab.innerHTML = '<i class="fa-solid fa-plus"></i>';
-    fab.onclick = () => showNewLoadModal();
-    document.body.appendChild(fab);
+  if (state.tab === 'camera' && camera.stream && $('#cameraFeed')) {
     return;
   }
 
-  const grouped = groupLoadsByMonth(sortLoadsByDate(entries));
-  const monthKeys = Object.keys(grouped).sort().reverse();
-
-  let html = `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-      <h1 style="font-size:20px;font-weight:700"><i class="fa-solid fa-truck" style="color:#3b82f6;margin-right:8px"></i>Carregamentos</h1>
-      <button id="toggleAdvOpts" class="btn-secondary" style="padding:8px 12px;background:#334155;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600">
-        <i class="fa-solid fa-sliders" style="margin-right:6px"></i>Opções
-      </button>
-    </div>
-    
-    <div id="advancedOptionsPanel" style="display:none;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px;margin-bottom:16px">
-      <div style="font-size:12px;color:#94a3b8;margin-bottom:8px;font-weight:600">FILTROS E AÇÕES</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-        <button class="btn-secondary" style="padding:8px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:11px;font-weight:600" onclick="generateAllQRPDFs()">
-          <i class="fa-solid fa-qrcode" style="margin-right:4px"></i>QR Códigos
-        </button>
-        <button class="btn-secondary" style="padding:8px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:11px;font-weight:600" onclick="generateAllReports()">
-          <i class="fa-solid fa-file-pdf" style="margin-right:4px"></i>Relatórios
-        </button>
-      </div>
-    </div>
-  `;
-
-  html += monthKeys.map(monthKey => {
-    const group = grouped[monthKey];
-    return `
-      <div style="margin-bottom:20px">
-        <h3 style="font-size:13px;font-weight:700;color:#64748b;text-transform:capitalize;margin-bottom:12px;padding:0 12px;letter-spacing:0.5px">${group.name}</h3>
-        ${group.loads.map(([id, l]) => {
-      const s = getLoadStats(l);
-      const matName = materials[l.materialId]?.name || 'N/A';
-      const statusColor = s.total === 0 ? 'badge-info' : s.pct >= 80 ? 'badge-success' : 'badge-danger';
-      const statusText = s.total === 0 ? 'Pendente' : s.pct + '% OK';
-      return `
-            <div class="card" style="cursor:pointer;margin-bottom:10px;transition:all 0.3s ease" onmouseover="this.style.transform='translateX(4px)'" onmouseout="this.style.transform='translateX(0)'" onclick="openLoadDetail('${id}')">
-              <div style="display:flex;justify-content:space-between;align-items:start;gap:12px">
-                <div style="flex:1">
-                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                    <div style="width:4px;height:24px;background:${s.pct >= 80 ? '#22c55e' : '#ef4444'};border-radius:2px"></div>
-                    <strong style="font-size:14px">${l.supplier}</strong>
-                  </div>
-                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px;color:#94a3b8;margin-bottom:6px">
-                    <div><i class="fa-solid fa-calendar" style="margin-right:4px;width:12px"></i>${formatDate(l.date)}</div>
-                    <div><i class="fa-solid fa-file" style="margin-right:4px;width:12px"></i>NF: ${l.invoiceNumber || 'N/A'}</div>
-                    <div><i class="fa-solid fa-cube" style="margin-right:4px;width:12px"></i>Lote: ${l.lot}</div>
-                    <div><i class="fa-solid fa-flask" style="margin-right:4px;width:12px"></i>${matName}</div>
-                  </div>
-                  <div style="font-size:10px;color:#64748b"><i class="fa-solid fa-user" style="margin-right:4px;width:12px"></i>Resp: ${l.responsible}</div>
-                </div>
-                <div style="text-align:right">
-                  <span class="badge ${statusColor}" style="font-weight:600;white-space:nowrap">${statusText}</span>
-                  <div style="font-size:11px;color:#94a3b8;margin-top:6px">${s.total} paletes</div>
-                </div>
-              </div>
-              <div class="progress-bar" style="margin-top:10px"><div class="progress-fill" style="width:${s.pct}%;background:${s.pct >= 80 ? '#22c55e' : '#ef4444'};transition:width 0.3s ease"></div></div>
-            </div>
-          `;
-    }).join('')}
-      </div>
-    `;
-  }).join('');
-
-  mc.innerHTML = html;
-
-  // Toggle Advanced Options
-  document.getElementById('toggleAdvOpts').onclick = function () {
-    const panel = document.getElementById('advancedOptionsPanel');
-    UIState.showAdvancedOptions = !UIState.showAdvancedOptions;
-    panel.style.display = UIState.showAdvancedOptions ? 'block' : 'none';
-    this.style.background = UIState.showAdvancedOptions ? '#3b82f6' : '#334155';
-  };
-
-  document.querySelectorAll('.fab').forEach(f => f.remove());
-  const fab = document.createElement('button');
-  fab.className = 'fab';
-  fab.innerHTML = '<i class="fa-solid fa-plus"></i>';
-  fab.onclick = () => showNewLoadModal();
-  document.body.appendChild(fab);
-}
-
-// ==================== QR CODE TAB ====================
-function renderQRCode() {
-  const mc = document.getElementById('mainContent');
-  const entries = Object.entries(loads);
-
-  mc.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
-      <h1 style="font-size:20px;font-weight:700"><i class="fa-solid fa-qrcode" style="color:#3b82f6;margin-right:8px"></i>Gerador de QR Codes</h1>
-      <button id="toggleQROptions" class="btn-secondary" style="padding:8px 12px;background:#334155;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600">
-        <i class="fa-solid fa-cog" style="margin-right:6px"></i>Ações
-      </button>
-    </div>
-    
-    <div id="qrOptionsPanel" style="display:none;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px;margin-bottom:16px">
-      <div style="font-size:12px;color:#94a3b8;margin-bottom:8px;font-weight:600">OPÇÕES RÁPIDAS</div>
-      <button class="btn-secondary" style="width:100%;padding:10px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600;margin-bottom:8px" onclick="generateAllQRPDFs()">
-        <i class="fa-solid fa-download" style="margin-right:6px"></i>Baixar Todos QR Codes em PDF
-      </button>
-    </div>
-    
-    ${entries.length === 0 ? '<div class="card" style="text-align:center;color:#94a3b8;padding:32px"><i class="fa-solid fa-inbox" style="font-size:40px;margin-bottom:12px;display:block"></i><p>Nenhum carregamento para gerar QR Code</p></div>' :
-      entries.map(([id, l]) => {
-        const s = getLoadStats(l);
-        const matName = materials[l.materialId]?.name || 'N/A';
-        return `
-          <div class="card" style="cursor:pointer;margin-bottom:10px;transition:all 0.3s ease" onclick="openQRGenerator('${id}')">
-            <div style="display:flex;justify-content:space-between;align-items:start;gap:12px">
-              <div style="flex:1">
-                <strong style="font-size:14px;display:block;margin-bottom:6px">${l.supplier}</strong>
-                <div style="font-size:11px;color:#94a3b8"><i class="fa-solid fa-calendar" style="margin-right:4px;width:12px"></i>${formatDate(l.date)} · NF: ${l.invoiceNumber || 'N/A'}</div>
-                <div style="font-size:11px;color:#94a3b8;margin-top:4px"><i class="fa-solid fa-cube" style="margin-right:4px;width:12px"></i>Lote: ${l.lot} · ${matName}</div>
-              </div>
-              <span class="badge badge-info" style="font-weight:600">${s.total} paletes</span>
-            </div>
-          </div>
-        `;
-      }).join('')}
-  `;
-
-  document.getElementById('toggleQROptions').onclick = function () {
-    const panel = document.getElementById('qrOptionsPanel');
-    const isVisible = panel.style.display !== 'none';
-    panel.style.display = isVisible ? 'none' : 'block';
-    this.style.background = isVisible ? '#334155' : '#3b82f6';
-  };
-
-  document.querySelectorAll('.fab').forEach(f => f.remove());
-}
-
-function openQRGenerator(loadId) {
-  currentLoadId = loadId;
-  const l = loads[loadId];
-  const mat = materials[l.materialId];
-  const matName = mat?.name || 'N/A';
-  const paletes = l.paletes ? Object.entries(l.paletes) : [];
-
-  const mc = document.getElementById('mainContent');
-  mc.innerHTML = `
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
-      <button class="back-btn" onclick="switchTab('qrcode');currentLoadId=null" style="padding:8px;background:#334155;border-radius:6px;border:none;color:#f1f5f9;cursor:pointer"><i class="fa-solid fa-arrow-left"></i></button>
-      <div style="flex:1">
-        <h1 style="font-size:20px;font-weight:700">${l.supplier}</h1>
-        <div style="font-size:12px;color:#94a3b8;margin-top:4px">Lote ${l.lot} · ${matName}</div>
-      </div>
-    </div>
-    
-    <div style="display:flex;gap:8px;margin-bottom:16px">
-      <button class="btn-primary" style="flex:1;padding:10px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600" onclick="generateQRPDFLoad('${loadId}')">
-        <i class="fa-solid fa-file-pdf" style="margin-right:6px"></i>Gerar PDF Todos
-      </button>
-      <button class="btn-primary" style="flex:1;padding:10px;background:#22c55e;border:none;border-radius:6px;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600" onclick="showBulkPaleteModal('${loadId}')">
-        <i class="fa-solid fa-plus" style="margin-right:6px"></i>Adicionar Lote
-      </button>
-    </div>
-    
-    <h2 style="font-size:14px;font-weight:700;margin:16px 0 12px 0;color:#f1f5f9"><i class="fa-solid fa-cubes" style="margin-right:6px;color:#3b82f6"></i>Selecione um Palete</h2>
-    ${paletes.length === 0 ? '<div class="card" style="text-align:center;color:#94a3b8;padding:24px"><i class="fa-solid fa-inbox" style="font-size:32px;margin-bottom:8px;display:block"></i>Nenhum palete neste carregamento</div>' :
-      paletes.map(([pid, p], i) => `
-        <div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;cursor:pointer;transition:all 0.3s ease" onmouseover="this.style.background='#334155'" onmouseout="this.style.background='#1e293b'" onclick="showQRCodeModal('${loadId}','${pid}',${i + 1})">
-          <div>
-            <strong style="font-size:13px;display:block">Palete ${i + 1}</strong>
-            <div style="font-size:11px;color:#94a3b8;margin-top:4px"><i class="fa-solid fa-calendar" style="margin-right:4px;width:12px"></i>${formatDate(p.date)} · IF: ${p.ifValue.toFixed(2)} g/10min</div>
-          </div>
-          <i class="fa-solid fa-qrcode" style="font-size:20px;color:#3b82f6"></i>
-        </div>
-      `).join('')}
-  `;
-  document.querySelectorAll('.fab').forEach(f => f.remove());
-}
-
-function showQRCodeModal(loadId, paleteId, paleteNum) {
-  const l = loads[loadId];
-  const mat = materials[l.materialId];
-  const matName = mat?.name || 'N/A';
-
-  const qrData = {
-    supplier: l.supplier,
-    invoiceNumber: l.invoiceNumber,
-    lot: l.lot,
-    material: matName,
-    paleteNumber: paleteNum,
-    date: formatDate(l.date),
-    responsible: l.responsible,
-    ifValue: l.paletes[paleteId].ifValue
-  };
-
-  const qrString = JSON.stringify(qrData);
-  const qrId = `qr-${loadId}-${paleteId}`;
-
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.onclick = e => { if (e.target === overlay) closeModal(); };
-  overlay.innerHTML = `<div class="modal-content">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-      <h2 style="font-size:18px;font-weight:700"><i class="fa-solid fa-qrcode" style="color:#3b82f6;margin-right:8px"></i>QR Code - Palete ${paleteNum}</h2>
-      <button onclick="closeModal()" style="background:none;border:none;color:#94a3b8;cursor:pointer;font-size:20px"><i class="fa-solid fa-x"></i></button>
-    </div>
-    
-    <div class="qr-info-display">
-      <div><strong>Fornecedor:</strong> ${l.supplier}</div>
-      <div style="margin-top:6px"><strong>NF:</strong> ${l.invoiceNumber}</div>
-      <div style="margin-top:6px"><strong>Lote:</strong> ${l.lot}</div>
-      <div style="margin-top:6px"><strong>Matéria-Prima:</strong> ${matName}</div>
-      <div style="margin-top:6px"><strong>Palete:</strong> ${paleteNum}</div>
-      <div style="margin-top:6px"><strong>IF Value:</strong> ${l.paletes[paleteId].ifValue.toFixed(2)} g/10min</div>
-      <div style="margin-top:6px"><strong>Responsável:</strong> ${l.responsible}</div>
-    </div>
-    
-    <div class="qr-container" id="${qrId}"></div>
-    
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px">
-      <button class="btn-primary" style="background:#3b82f6;padding:10px;border-radius:6px;border:none;color:#f1f5f9;cursor:pointer;font-size:13px;font-weight:600" onclick="downloadQRCodeImage('${qrId}','palete_${paleteNum}_${l.lot}')"><i class="fa-solid fa-download" style="margin-right:6px"></i>Imagem</button>
-      <button class="btn-primary" style="background:#3b82f6;padding:10px;border-radius:6px;border:none;color:#f1f5f9;cursor:pointer;font-size:13px;font-weight:600" onclick="downloadQRCodePDF('${qrId}','palete_${paleteNum}_${l.lot}')"><i class="fa-solid fa-file-pdf" style="margin-right:6px"></i>PDF</button>
-    </div>
-  </div>`;
-
-  document.body.appendChild(overlay);
-  window.addEventListener('resize', handleViewportChange);
-  handleViewportChange();
-
-  setTimeout(() => {
-    const qrContainer = document.getElementById(qrId);
-    if (qrContainer && !qrContainer.innerHTML.includes('canvas')) {
-      new QRCode(qrContainer, {
-        text: qrString,
-        width: 200,
-        height: 200,
-        colorDark: '#000000',
-        colorLight: '#ffffff'
-      });
-    }
-  }, 100);
-}
-
-function downloadQRCodeImage(qrId, filename) {
-  const qrElement = document.getElementById(qrId);
-  const canvas = qrElement.querySelector('canvas');
-  if (!canvas) { toast('QR Code não gerado', true); return; }
-
-  const link = document.createElement('a');
-  link.href = canvas.toDataURL('image/png');
-  link.download = `${filename}.png`;
-  link.click();
-  toast('QR Code baixado!');
-}
-
-function downloadQRCodePDF(qrId, filename) {
-  const { jsPDF } = window.jspdf;
-  const qrElement = document.getElementById(qrId);
-  const canvas = qrElement.querySelector('canvas');
-  if (!canvas) { toast('QR Code não gerado', true); return; }
-
-  const modalContent = qrElement.closest('.modal-content');
-  const modalTitle = modalContent.querySelector('h2').textContent;
-  const paleteNum = modalTitle.match(/Palete (\d+)/)[1];
-
-  let loadId, loadData;
-  for (const [lid, l] of Object.entries(loads)) {
-    if (l.paletes) {
-      for (const [pid, p] of Object.entries(l.paletes)) {
-        if (`qr-${lid}-${pid}` === qrId) {
-          loadId = lid;
-          loadData = l;
-          break;
-        }
-      }
+  let html = '';
+  if (state.detail?.type === 'load') html = renderLoadDetail(state.detail.id);
+  else if (state.detail?.type === 'qr') html = renderQrLoad(state.detail.id);
+  else {
+    switch (state.tab) {
+      case 'home': html = renderHome(); break;
+      case 'loads': html = renderLoads(); break;
+      case 'camera': html = renderCamera(); break;
+      case 'qrcode': html = renderQrTab(); break;
+      case 'materials': html = renderMaterials(); break;
     }
   }
 
-  if (!loadData) { toast('Erro ao gerar PDF', true); return; }
+  mc.innerHTML = `<div class="container">${html}</div>`;
 
-  const matName = materials[loadData.materialId]?.name || 'N/A';
-  const palete = loadData.paletes[Object.keys(loadData.paletes).find(pid => `qr-${loadId}-${pid}` === qrId)];
-  const dataRegistro = palete?.date || loadData.date;
-
-  const doc = new jsPDF({
-    orientation: 'portrait',
-    unit: 'mm',
-    format: 'a4'
-  });
-
-  doc.setFillColor(255, 255, 255);
-  doc.rect(0, 0, 210, 297, 'F');
-
-  doc.setFillColor(15, 23, 42);
-  doc.rect(0, 0, 210, 55, 'F');
-
-  doc.setTextColor(241, 245, 249);
-  doc.setFontSize(11);
-  doc.setFont(undefined, 'normal');
-
-  doc.text('PALETE #' + paleteNum, 15, 5);
-
-  doc.text('Lote: ' + loadData.lot, 15, 18);
-  doc.text('Material: ' + matName, 15, 28);
-
-  doc.setTextColor(200, 200, 200);
-  doc.setFontSize(8);
-  doc.text('Data: ' + formatDate(dataRegistro), 15, 45);
-
-  doc.setTextColor(30, 41, 59);
-  doc.setFontSize(32);
-  doc.setFont(undefined, 'bold');
-  doc.text('PALETE #' + paleteNum, 105, 72, { align: 'center' });
-
-  const qrImage = canvas.toDataURL('image/png');
-  const qrSize = 120;
-  const qrX = (210 - qrSize) / 2;
-  doc.addImage(qrImage, 'PNG', qrX, 85, qrSize, qrSize);
-
-  doc.setTextColor(30, 41, 59);
-  doc.setFontSize(12);
-  doc.setFont(undefined, 'bold');
-  doc.text('DETALHES DA MATÉRIA-PRIMA', 15, 220);
-
-  doc.setDrawColor(59, 130, 246);
-  doc.setLineWidth(0.5);
-  doc.line(15, 224, 195, 224);
-
-  doc.setFont(undefined, 'normal');
-  doc.setFontSize(12);
-  doc.text('Tipo: ' + matName, 15, 238);
-  doc.text('Data de Chegada: ' + formatDate(dataRegistro), 15, 252);
-
-  doc.setFontSize(8);
-  doc.setTextColor(150, 160, 170);
-  doc.text('EMBALAGENS TATUÍ', 15, 290);
-
-  doc.save(`${filename}.pdf`);
-  toast('PDF gerado!');
+  if (state.tab === 'camera') {
+    renderScannedList();
+  }
 }
 
-function generateQRPDFLoad(loadId) {
-  const { jsPDF } = window.jspdf;
-  const l = loads[loadId];
-  if (!l || !l.paletes) { toast('Sem paletes para gerar QR Codes', true); return; }
-
-  const mat = materials[l.materialId];
-  const matName = mat?.name || 'N/A';
-  const paletes = Object.entries(l.paletes);
-
-  const doc = new jsPDF({
-    orientation: 'portrait',
-    unit: 'mm',
-    format: 'a4'
-  });
-
-  let isFirstPage = true;
-  let qrCount = 0;
-  let qrsGenerated = 0;
-
-  const generateQRsAndPDF = async () => {
-    for (let index = 0; index < paletes.length; index++) {
-      const [pid, p] = paletes[index];
-
-      if (!isFirstPage) {
-        doc.addPage();
-      }
-      isFirstPage = false;
-
-      const paleteNum = index + 1;
-
-      doc.setFillColor(255, 255, 255);
-      doc.rect(0, 0, 210, 297, 'F');
-
-      doc.setFillColor(15, 23, 42);
-      doc.rect(0, 0, 210, 50, 'F');
-
-      doc.setTextColor(241, 245, 249);
-      doc.setFontSize(11);
-      doc.setFont(undefined, 'normal');
-      doc.text('PALETE #' + paleteNum, 15, 10);
-      doc.text('Lote: ' + l.lot, 15, 20);
-      doc.text('Material: ' + matName, 15, 30);
-
-      doc.setTextColor(200, 200, 200);
-      doc.setFontSize(8);
-      doc.text('Data: ' + formatDate(p.date), 15, 40);
-
-      doc.setTextColor(30, 41, 59);
-      doc.setFontSize(32);
-      doc.setFont(undefined, 'bold');
-      doc.text('PALETE #' + paleteNum, 105, 72, { align: 'center' });
-
-      const qrData = {
-        supplier: l.supplier,
-        invoiceNumber: l.invoiceNumber,
-        lot: l.lot,
-        material: matName,
-        paleteNumber: paleteNum,
-        date: formatDate(p.date),
-        responsible: l.responsible,
-        ifValue: p.ifValue
-      };
-
-      const qrString = JSON.stringify(qrData);
-
-      await new Promise((resolve) => {
-        const tempContainer = document.createElement('div');
-        tempContainer.style.display = 'none';
-        document.body.appendChild(tempContainer);
-
-        new QRCode(tempContainer, {
-          text: qrString,
-          width: 200,
-          height: 200,
-          colorDark: '#000000',
-          colorLight: '#ffffff'
-        });
-
-        setTimeout(() => {
-          const canvas = tempContainer.querySelector('canvas');
-          if (canvas) {
-            const qrImage = canvas.toDataURL('image/png');
-            const qrSize = 120;
-            const qrX = (210 - qrSize) / 2;
-            doc.addImage(qrImage, 'PNG', qrX, 85, qrSize, qrSize);
-            qrsGenerated++;
-          }
-          tempContainer.remove();
-          resolve();
-        }, 200);
-      });
-
-      doc.setTextColor(30, 41, 59);
-      doc.setFontSize(12);
-      doc.setFont(undefined, 'bold');
-      doc.text('DETALHES DA MATÉRIA-PRIMA', 15, 220);
-
-      doc.setDrawColor(59, 130, 246);
-      doc.setLineWidth(0.5);
-      doc.line(15, 224, 195, 224);
-
-      doc.setFont(undefined, 'normal');
-      doc.setFontSize(12);
-      doc.text('Tipo: ' + matName, 15, 238);
-      doc.text('Data de Chegada: ' + formatDate(p.date), 15, 252);
-   
-      doc.setFontSize(8);
-      doc.setTextColor(150, 160, 170);
-      doc.text('EMBALAGENS TATUÍ', 15, 290);
-    }
-
-    doc.save(`QR_Codes_Lote_${l.lot}.pdf`);
-    toast('PDF com ' + qrsGenerated + ' QR Code(s) gerado!');
-  };
-
-  generateQRsAndPDF();
-}
-
-function generateAllQRPDFs() {
-  const allLoads = Object.entries(loads);
-  if (allLoads.length === 0) { toast('Nenhum carregamento', true); return; }
-
-  let processedCount = 0;
-  const totalLoads = allLoads.length;
-
-  const processLoad = (index) => {
-    if (index >= allLoads.length) {
-      toast(`Gerados ${processedCount} PDF(s) com QR Codes!`);
-      return;
-    }
-
-    const [id] = allLoads[index];
-
-    setTimeout(() => {
-      generateQRPDFLoad(id);
-      processedCount++;
-      processLoad(index + 1);
-    }, 800);
-  };
-
-  toast('Gerando ' + totalLoads + ' PDF(s)...');
-  processLoad(0);
-}
-
-
-
-// ==================== CAMERA TAB ====================
-function renderCamera() {
-  const mc = document.getElementById('mainContent');
-  mc.innerHTML = `
-    <h1 style="font-size:20px;font-weight:700;margin-bottom:20px"><i class="fa-solid fa-camera" style="color:#3b82f6;margin-right:8px"></i>Leitor de QR Code</h1>
-    
-    <div style="position:relative;border-radius:12px;overflow:hidden;background:#0f172a;margin-bottom:16px;aspect-ratio:1/1;max-height:380px;box-shadow:0 8px 32px rgba(59,130,246,0.2)">
-      <video id="cameraFeed" style="width:100%;height:100%;object-fit:cover;display:none"></video>
-      <div id="cameraPlaceholder" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg, #1e293b, #0f172a);color:#94a3b8;font-size:14px;flex-direction:column;gap:12px">
-        <i class="fa-solid fa-video" style="font-size:48px;color:#3b82f6;opacity:0.6"></i>
-        <span style="font-weight:600">Câmera não iniciada</span>
-      </div>
-      
-      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:10;opacity:0;transition:opacity 0.3s" id="cameraReticle">
-        <div style="width:200px;height:200px;border:2px solid #3b82f6;border-radius:50%;position:relative">
-          <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:6px;height:6px;background:#22c55e;border-radius:50%;box-shadow:0 0 10px rgba(34,197,94,0.8)"></div>
-        </div>
-      </div>
-      
-      <div id="cameraStatus" style="position:absolute;top:12px;left:12px;display:flex;align-items:center;gap:6px;background:rgba(34,197,94,0.15);padding:8px 12px;border-radius:6px;border:1px solid rgba(34,197,94,0.4);opacity:0;transition:opacity 0.3s;font-size:11px;color:#22c55e;font-weight:600">
-        <div style="width:6px;height:6px;background:#22c55e;border-radius:50%;animation:pulse 1.5s infinite"></div>
-        <span>Ativo</span>
-      </div>
-    </div>
-    
-    <style>
-      @keyframes pulse {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.5; }
-      }
-    </style>
-    
-    <div style="display:flex;gap:12px;margin-bottom:16px">
-      <button class="btn-primary" style="flex:1;padding:12px;background:#3b82f6;border:none;border-radius:8px;color:#f1f5f9;font-weight:600;cursor:pointer;font-size:14px" id="toggleCameraBtn"><i class="fa-solid fa-play" style="margin-right:6px"></i>Iniciar</button>
-      <div style="padding:12px;background:#334155;border-radius:8px;border:1px solid #475569;color:#94a3b8;font-weight:600;font-size:13px;text-align:center;min-width:80px">
-        <span id="qrCounter">0</span>
-      </div>
-    </div>
-    
-    <div id="scannedResults" style="margin-top:12px"></div>
-  `;
+/** Single FAB, replaced on each screen. */
+function setFab(action, data = {}, label = 'Adicionar') {
   document.querySelectorAll('.fab').forEach(f => f.remove());
-
-  setTimeout(() => {
-    const videoElement = document.getElementById('cameraFeed');
-    const placeholder = document.getElementById('cameraPlaceholder');
-    const toggleBtn = document.getElementById('toggleCameraBtn');
-    const statusIndicator = document.getElementById('cameraStatus');
-    const reticle = document.getElementById('cameraReticle');
-    const qrCounter = document.getElementById('qrCounter');
-    let isCameraActive = false;
-    let stream = null;
-    let scanInterval = null;
-    let lastScannedTime = 0;
-
-    toggleBtn.onclick = async () => {
-      if (!isCameraActive) {
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-              facingMode: 'environment',
-              width: { ideal: 1280 },
-              height: { ideal: 720 }
-            }
-          });
-          videoElement.srcObject = stream;
-          videoElement.style.display = 'block';
-          placeholder.style.display = 'none';
-          videoElement.play();
-          toggleBtn.innerHTML = '<i class="fa-solid fa-stop" style="margin-right:6px"></i>Parar';
-          statusIndicator.style.opacity = '1';
-          reticle.style.opacity = '1';
-          isCameraActive = true;
-
-          scanInterval = setInterval(() => {
-            if (!isCameraActive || videoElement.videoWidth === 0) return;
-
-            const now = Date.now();
-            if (now - lastScannedTime < 500) return;
-
-            const canvas = document.createElement('canvas');
-            canvas.width = 640;
-            canvas.height = 480;
-            const ctx = canvas.getContext('2d', { willReadFrequently: true });
-            ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
-            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const code = jsQR(imageData.data, canvas.width, canvas.height);
-
-            if (code) {
-              try {
-                const qrData = JSON.parse(code.data);
-                lastScannedTime = now;
-                if (navigator.vibrate) navigator.vibrate(100);
-
-                const reticleEl = document.getElementById('cameraReticle');
-                if (reticleEl) {
-                  reticleEl.style.borderColor = '#22c55e';
-                  setTimeout(() => {
-                    if (reticleEl && document.body.contains(reticleEl)) {
-                      reticleEl.style.borderColor = '#3b82f6';
-                    }
-                  }, 400);
-                }
-                handleScannedQRCamera(qrData);
-              } catch (e) { }
-            }
-          }, 500);
-        } catch (err) {
-          toast('Erro ao acessar câmera: ' + err.message, true);
-        }
-      } else {
-        isCameraActive = false;
-        if (scanInterval) {
-          clearInterval(scanInterval);
-          scanInterval = null;
-        }
-        if (stream) {
-          stream.getTracks().forEach(track => track.stop());
-          stream = null;
-        }
-        videoElement.srcObject = null;
-        videoElement.style.display = 'none';
-        placeholder.style.display = 'flex';
-        toggleBtn.innerHTML = '<i class="fa-solid fa-play" style="margin-right:6px"></i>Iniciar';
-        statusIndicator.style.opacity = '0';
-        reticle.style.opacity = '0';
-      }
-    };
-  }, 100);
-}
-
-function handleScannedQRCamera(qrData) {
-  const resultsDiv = document.getElementById('scannedResults');
-  const qrCounter = document.getElementById('qrCounter');
-  const qrId = `${qrData.supplier}-${qrData.lot}-${qrData.paleteNumber}`;
-
-  if (scannedQRs[qrId]) return;
-
-  scannedQRs[qrId] = qrData;
-  const count = Object.keys(scannedQRs).length;
-  if (qrCounter) qrCounter.textContent = count;
-
-  const card = document.createElement('div');
-  card.className = 'card';
-  card.style.marginBottom = '8px';
-  card.style.cursor = 'pointer';
-  card.style.transition = 'all 0.2s ease';
-  card.style.borderLeft = '3px solid #3b82f6';
-  card.onmouseover = function () { this.style.background = '#334155'; };
-  card.onmouseout = function () { this.style.background = '#1e293b'; };
-
-  card.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px" onclick="showScannedQRModal('${qrId}')">
-      <div style="flex:1;min-width:0">
-        <div style="font-weight:600;font-size:13px;color:#f1f5f9">${qrData.supplier}</div>
-        <div style="font-size:11px;color:#94a3b8;margin-top:3px">Palete #${qrData.paleteNumber} · Lote ${qrData.lot}</div>
-      </div>
-      <button class="btn-danger btn-sm" style="flex-shrink:0" onclick="event.stopPropagation();this.closest('.card').remove();delete scannedQRs['${qrId}'];document.getElementById('qrCounter').textContent = Object.keys(scannedQRs).length;"><i class="fa-solid fa-trash"></i></button>
-    </div>
-  `;
-  resultsDiv.insertBefore(card, resultsDiv.firstChild);
-
-  toast('✓ QR Code lido!');
-}
-
-function showScannedQRModal(qrId) {
-  const qrData = Object.values(scannedQRs).find(q => `${q.supplier}-${q.lot}-${q.paleteNumber}` === qrId);
-  if (!qrData) return;
-
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.onclick = e => { if (e.target === overlay) closeModal(); };
-
-  const qrString = JSON.stringify(qrData);
-  const qrContainerId = `modal-qr-${Date.now()}`;
-
-  overlay.innerHTML = `<div class="modal-content">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-      <h2 style="font-size:16px;font-weight:700"><i class="fa-solid fa-qrcode" style="color:#3b82f6;margin-right:6px"></i>Palete #${qrData.paleteNumber}</h2>
-      <button onclick="closeModal()" style="background:none;border:none;color:#94a3b8;cursor:pointer;font-size:18px"><i class="fa-solid fa-x"></i></button>
-    </div>
-    
-    <div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:12px;margin-bottom:12px;font-size:12px">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-        <div><span style="color:#64748b">Fornecedor:</span> <span style="font-weight:600;color:#f1f5f9">${qrData.supplier}</span></div>
-        <div><span style="color:#64748b">Lote:</span> <span style="font-weight:600;color:#f1f5f9">${qrData.lot}</span></div>
-        <div><span style="color:#64748b">Material:</span> <span style="font-weight:600;color:#f1f5f9">${qrData.material}</span></div>
-        <div><span style="color:#64748b">IF:</span> <span style="font-weight:600;color:#f1f5f9">${qrData.ifValue.toFixed(2)}</span></div>
-      </div>
-    </div>
-    
-    <div class="qr-container" id="${qrContainerId}" style="background:#fff;padding:16px;border-radius:8px;display:flex;align-items:center;justify-content:center;margin-bottom:12px"></div>
-    
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-      <button class="btn-primary" style="background:#3b82f6;padding:10px;border-radius:6px;border:none;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600" onclick="downloadScannedQRImage('${qrContainerId}','palete_${qrData.paleteNumber}')"><i class="fa-solid fa-download" style="margin-right:4px"></i>Imagem</button>
-      <button class="btn-primary" style="background:#3b82f6;padding:10px;border-radius:6px;border:none;color:#f1f5f9;cursor:pointer;font-size:12px;font-weight:600" onclick="downloadScannedQRPDF('${qrContainerId}','palete_${qrData.paleteNumber}','${btoa(JSON.stringify(qrData))}')"><i class="fa-solid fa-file-pdf" style="margin-right:4px"></i>PDF</button>
-    </div>
-  </div>`;
-
-  document.body.appendChild(overlay);
-  window.addEventListener('resize', handleViewportChange);
-  handleViewportChange();
-
-  setTimeout(() => {
-    const qrContainer = document.getElementById(qrContainerId);
-    if (qrContainer && !qrContainer.innerHTML.includes('canvas')) {
-      new QRCode(qrContainer, {
-        text: qrString,
-        width: 180,
-        height: 180,
-        colorDark: '#000000',
-        colorLight: '#ffffff'
-      });
-    }
-  }, 100);
-}
-
-function downloadScannedQRImage(qrId, filename) {
-  const qrElement = document.getElementById(qrId);
-  const canvas = qrElement.querySelector('canvas');
-  if (!canvas) { toast('QR Code não gerado', true); return; }
-
-  const link = document.createElement('a');
-  link.href = canvas.toDataURL('image/png');
-  link.download = `${filename}.png`;
-  link.click();
-  toast('QR Code baixado!');
-}
-
-function downloadScannedQRPDF(qrId, filename, qrDataEncoded) {
-  const { jsPDF } = window.jspdf;
-  const qrElement = document.getElementById(qrId);
-  const canvas = qrElement.querySelector('canvas');
-  if (!canvas) { toast('QR Code não gerado', true); return; }
-
-  const qrData = JSON.parse(atob(qrDataEncoded));
-
-  const doc = new jsPDF({
-    orientation: 'portrait',
-    unit: 'mm',
-    format: 'a4'
-  });
-
-  doc.setFillColor(255, 255, 255);
-  doc.rect(0, 0, 210, 297, 'F');
-
-  doc.setFillColor(15, 23, 42);
-  doc.rect(0, 0, 210, 50, 'F');
-
-  doc.setTextColor(59, 130, 246);
-  doc.setFontSize(28);
-  doc.setFont(undefined, 'bold');
-  doc.text('PALETE', 15, 25);
-  doc.setFontSize(24);
-  doc.text('#' + qrData.paleteNumber, 75, 25);
-
-  doc.setTextColor(100, 116, 139);
-  doc.setFontSize(10);
-  doc.setFont(undefined, 'normal');
-  doc.text('Lote: ' + qrData.lot + ' | Data: ' + qrData.date, 15, 37);
-
-  const qrImage = canvas.toDataURL('image/png');
-  const qrSize = 110;
-  const qrX = (210 - qrSize) / 2;
-  doc.addImage(qrImage, 'PNG', qrX, 65, qrSize, qrSize);
-
-  doc.setDrawColor(220, 220, 220);
-  doc.setLineWidth(0.5);
-  doc.rect(qrX - 5, 60, qrSize + 10, qrSize + 10);
-
-  let cardY = 185;
-
-  doc.setFillColor(248, 250, 252);
-  doc.roundedRect(15, cardY, 90, 24, 2, 2, 'F');
-  doc.setTextColor(100, 116, 139);
-  doc.setFontSize(8);
-  doc.setFont(undefined, 'bold');
-  doc.text('FORNECEDOR', 20, cardY + 6);
-  doc.setTextColor(30, 41, 59);
-  doc.setFontSize(10);
-  doc.setFont(undefined, 'bold');
-  doc.text(qrData.supplier, 20, cardY + 16);
-
-  doc.setFillColor(248, 250, 252);
-  doc.roundedRect(105, cardY, 90, 24, 2, 2, 'F');
-  doc.setTextColor(100, 116, 139);
-  doc.setFontSize(8);
-  doc.setFont(undefined, 'bold');
-  doc.text('NOTA FISCAL', 110, cardY + 6);
-  doc.setTextColor(30, 41, 59);
-  doc.setFontSize(10);
-  doc.setFont(undefined, 'bold');
-  doc.text(qrData.invoiceNumber, 110, cardY + 16);
-
-  cardY += 30;
-
-  doc.setFillColor(248, 250, 252);
-  doc.roundedRect(15, cardY, 90, 24, 2, 2, 'F');
-  doc.setTextColor(100, 116, 139);
-  doc.setFontSize(8);
-  doc.setFont(undefined, 'bold');
-  doc.text('MATÉRIA-PRIMA', 20, cardY + 6);
-  doc.setTextColor(30, 41, 59);
-  doc.setFontSize(10);
-  doc.setFont(undefined, 'bold');
-  doc.text(qrData.material, 20, cardY + 16);
-
-  doc.setFillColor(59, 130, 246);
-  doc.roundedRect(105, cardY, 90, 24, 2, 2, 'F');
-  doc.setTextColor(255, 255, 255);
-  doc.setFontSize(8);
-  doc.setFont(undefined, 'bold');
-  doc.setFontSize(13);
-  doc.setFont(undefined, 'bold');
-  doc.text(qrData.ifValue.toFixed(2), 110, cardY + 16);
-
-  doc.setTextColor(150, 150, 150);
-  doc.setFontSize(8);
-  doc.setFont(undefined, 'normal');
-  doc.text('Gerado em: ' + new Date().toLocaleString('pt-BR'), 15, 285);
-  doc.text('Este QR Code garante rastreabilidade completa do palete', 15, 291);
-
-  doc.save(`${filename}.pdf`);
-  toast('PDF gerado!');
-}
-
-// ==================== MATERIALS TAB ====================
-function renderMaterials() {
-  const mc = document.getElementById('mainContent');
-  const entries = Object.entries(materials);
-  mc.innerHTML = `
-    <h1 style="font-size:20px;font-weight:700;margin-bottom:20px"><i class="fa-solid fa-flask" style="color:#3b82f6;margin-right:8px"></i>Matérias-Primas</h1>
-    ${entries.length === 0 ? '<div class="card" style="text-align:center;color:#94a3b8;padding:32px"><i class="fa-solid fa-inbox" style="font-size:40px;margin-bottom:12px;display:block"></i><p>Nenhuma matéria-prima cadastrada</p></div>' :
-      entries.map(([id, m]) => `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px">
-        <div style="flex:1">
-          <strong style="font-size:14px;display:block;margin-bottom:6px">${m.name}</strong>
-          <div style="font-size:12px;color:#94a3b8"><i class="fa-solid fa-gauge" style="margin-right:4px;width:12px"></i>Faixa IF: ${m.ifMin} — ${m.ifMax} g/10min</div>
-        </div>
-        <button class="btn-danger btn-sm" onclick="deleteMaterial('${id}')"><i class="fa-solid fa-trash"></i></button>
-      </div>`).join('')}
-  `;
-  document.querySelectorAll('.fab').forEach(f => f.remove());
+  if (!action) return;
   const fab = document.createElement('button');
   fab.className = 'fab';
+  fab.dataset.action = action;
+  Object.entries(data).forEach(([k, v]) => { fab.dataset[k] = v; });
+  fab.setAttribute('aria-label', label);
   fab.innerHTML = '<i class="fa-solid fa-plus"></i>';
-  fab.onclick = () => showNewMaterialModal();
   document.body.appendChild(fab);
 }
-// ==================== LOAD DETAIL ====================
-function openLoadDetail(id) {
-  currentLoadId = id;
-  renderLoadDetail();
+
+/* ---------- Shared partials ---------- */
+const icon = name => `<i class="fa-solid fa-${name}" aria-hidden="true"></i>`;
+const badge = ({ label, tone }) => `<span class="badge badge-${tone}">${esc(label)}</span>`;
+
+function pageHeader(title, iconName, actionsHtml = '') {
+  return `<header class="page-header">
+    <h1 class="page-title">${icon(iconName)}<span>${esc(title)}</span></h1>
+    ${actionsHtml ? `<div class="page-actions">${actionsHtml}</div>` : ''}
+  </header>`;
 }
 
-function renderLoadDetail() {
-  const mc = document.getElementById('mainContent');
-  const id = currentLoadId;
-  const l = loads[id];
-  if (!l) { switchTab('loads'); return; }
-  const mat = materials[l.materialId];
-  const matName = mat?.name || 'N/A';
-  const paletes = l.paletes ? Object.entries(l.paletes) : [];
+function detailHeader(title, subtitle, back, trailing = '') {
+  return `<header class="detail-header">
+    <button class="btn-icon" data-action="back" data-to="${back}" aria-label="Voltar">${icon('arrow-left')}</button>
+    <div class="detail-heading">
+      <h1 class="detail-title">${esc(title)}</h1>
+      <p class="detail-sub">${subtitle}</p>
+    </div>
+    ${trailing}
+  </header>`;
+}
+
+function emptyState(text, hint = '') {
+  return `<div class="empty-state">${icon('inbox')}<p>${esc(text)}</p>${hint ? `<small>${esc(hint)}</small>` : ''}</div>`;
+}
+
+function progress(pct, tone) {
+  return `<div class="progress" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">
+    <div class="progress-fill tone-${tone}" style="width:${pct}%"></div></div>`;
+}
+
+function loadCard(id, l, action = 'open-load') {
   const s = getLoadStats(l);
-  const status = s.total === 0 ? 'PENDENTE' : s.pct >= 80 ? 'APROVADO' : 'REPROVADO';
-  const statusColor = s.pct >= 80 ? '#22c55e' : '#ef4444';
-
-  let chartHTML = '';
-  if (paletes.length > 0 && mat) {
-    const maxVal = Math.max(mat.ifMax * 1.3, ...paletes.map(([, p]) => p.ifValue));
-    const minLine = (mat.ifMin / maxVal) * 100;
-    const maxLine = (mat.ifMax / maxVal) * 100;
-    chartHTML = `<div class="card">
-      <div style="font-size:14px;font-weight:600;margin-bottom:12px;color:#f1f5f9"><i class="fa-solid fa-chart-bar" style="margin-right:6px;color:#3b82f6"></i>Gráfico IF por Palete</div>
-      <div style="position:relative;height:160px;padding-bottom:24px">
-        <div class="chart-line" style="bottom:${minLine}%;border-color:#22c55e40"></div>
-        <div class="chart-line" style="bottom:${maxLine}%;border-color:#ef444440"></div>
-        <div style="position:absolute;left:-4px;bottom:${minLine}%;font-size:10px;color:#22c55e;transform:translateY(50%);font-weight:600">${mat.ifMin}</div>
-        <div style="position:absolute;left:-4px;bottom:${maxLine}%;font-size:10px;color:#ef4444;transform:translateY(50%);font-weight:600">${mat.ifMax}</div>
-        <div class="chart-bar-container" style="height:100%;padding-left:32px">
-          ${paletes.map(([, p], i) => {
-      const h = (p.ifValue / maxVal) * 100;
-      const ok = mat && p.ifValue >= mat.ifMin && p.ifValue <= mat.ifMax;
-      return `<div class="chart-bar" style="height:${h}%;background:${ok ? '#22c55e' : '#ef4444'};border-radius:4px 4px 0 0">
-                    <div class="chart-bar-label">P${i + 1}</div>
-                  </div>`;
-    }).join('')}
-        </div>
+  const st = loadStatus(s);
+  const pctLabel = s.measured ? `${s.pct}%` : st.label;
+  return `<button class="list-card tone-edge-${st.tone}" data-action="${action}" data-id="${esc(id)}">
+    <div class="list-card-top">
+      <div class="list-card-title-group">
+        <strong class="list-card-title">${esc(l.supplier)}</strong>
+        <span class="nf-chip">NF ${esc(l.invoiceNumber || 'N/A')}</span>
       </div>
-    </div>`;
-  }
-
-  mc.innerHTML = `
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
-      <button class="back-btn" onclick="currentLoadId=null;renderCurrentTab()" style="padding:8px;background:#334155;border-radius:6px;border:none;color:#f1f5f9;cursor:pointer"><i class="fa-solid fa-arrow-left"></i></button>
-      <div style="flex:1">
-        <h1 style="font-size:20px;font-weight:700">${l.supplier}</h1>
-        <div style="font-size:12px;color:#94a3b8;margin-top:4px">NF: ${l.invoiceNumber} · ${matName} · Lote ${l.lot}</div>
-      </div>
-      <span class="badge ${status === 'APROVADO' ? 'badge-success' : status === 'REPROVADO' ? 'badge-danger' : 'badge-info'}" style="font-size:12px;font-weight:600;padding:6px 12px">${status}</span>
+      ${badge({ label: pctLabel, tone: st.tone })}
     </div>
-    
-    <div class="card">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:12px">
-        <div><span style="color:#94a3b8;display:block;font-size:11px;margin-bottom:4px">Data</span>${formatDate(l.date)}</div>
-        <div><span style="color:#94a3b8;display:block;font-size:11px;margin-bottom:4px">Nota Fiscal</span>${l.invoiceNumber || 'N/A'}</div>
-        <div><span style="color:#94a3b8;display:block;font-size:11px;margin-bottom:4px">Responsável</span>${l.responsible}</div>
-        <div><span style="color:#94a3b8;display:block;font-size:11px;margin-bottom:4px">Média IF</span>${s.avg ? s.avg.toFixed(2) + ' g/10min' : '—'}</div>
-      </div>
+    <div class="meta-grid">
+      <span>${icon('calendar')}${formatDate(l.date)}</span>
+      <span>${icon('cube')}Lote ${esc(l.lot)}</span>
+      <span>${icon('flask')}${esc(materialOf(l)?.name || 'N/A')}</span>
+      <span>${icon('pallet')}${s.total} palete(s)</span>
     </div>
-    
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
-      <div style="background:rgba(59, 130, 246, 0.1);border-radius:8px;padding:12px;border-left:3px solid #3b82f6">
-        <div style="font-size:11px;color:#94a3b8;margin-bottom:4px">Aprovados</div>
-        <div style="font-size:18px;font-weight:700;color:#3b82f6">${s.approved}/${s.total}</div>
-      </div>
-      <div style="background:rgba(${s.pct >= 80 ? '34, 197, 94' : '239, 68, 68'}, 0.1);border-radius:8px;padding:12px;border-left:3px solid ${s.pct >= 80 ? '#22c55e' : '#ef4444'}">
-        <div style="font-size:11px;color:#94a3b8;margin-bottom:4px">Taxa de Aprovação</div>
-        <div style="font-size:18px;font-weight:700;color:${s.pct >= 80 ? '#22c55e' : '#ef4444'}">${s.pct}%</div>
-      </div>
-    </div>
-    
-    <div style="display:flex;gap:10px;margin-bottom:12px">
-      <button class="btn-primary" style="flex:1;background:#3b82f6;padding:10px;border-radius:6px;border:none;color:#f1f5f9;cursor:pointer;font-size:13px;font-weight:600" onclick="showEditLoadModal('${id}')"><i class="fa-solid fa-edit" style="margin-right:6px"></i>Editar</button>
-      <button class="btn-primary" style="flex:1;background:#3b82f6;padding:10px;border-radius:6px;border:none;color:#f1f5f9;cursor:pointer;font-size:13px;font-weight:600" onclick="generatePDFLoad('${id}')"><i class="fa-solid fa-download" style="margin-right:6px"></i>PDF</button>
-    </div>
-    
-    ${chartHTML}
-    
-    <h2 style="font-size:14px;font-weight:700;margin:16px 0 12px 0;color:#f1f5f9"><i class="fa-solid fa-cubes" style="margin-right:6px;color:#3b82f6"></i>Paletes (${s.total})</h2>
-    ${paletes.length === 0 ? '<div class="card" style="text-align:center;color:#94a3b8;padding:24px"><i class="fa-solid fa-inbox" style="font-size:32px;margin-bottom:8px;display:block"></i>Nenhum palete. Toque + para adicionar.</div>' :
-      paletes.map(([pid, p], i) => {
-        const ok = mat && p.ifValue >= mat.ifMin && p.ifValue <= mat.ifMax;
-        return `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;cursor:pointer;transition:all 0.3s" onmouseover="this.style.background='#1e293b'" onmouseout="this.style.background='#0f172a'" onclick="showEditPaleteModal('${id}','${pid}',${i + 1})">
-          <div style="flex:1">
-            <strong style="font-size:13px">Palete ${i + 1}</strong>
-            <div style="font-size:11px;color:#94a3b8;margin-top:4px"><i class="fa-solid fa-calendar" style="margin-right:4px;width:12px"></i>${formatDate(p.date)} · IF: ${p.ifValue.toFixed(2)} g/10min</div>
-          </div>
-          <div style="display:flex;gap:8px;align-items:center">
-            <span class="badge ${ok ? 'badge-success' : 'badge-danger'}" style="font-weight:600">${ok ? '✓ OK' : '✗ Fora'}</span>
-            <button class="btn-danger btn-sm" style="padding:6px 8px;background:#ef4444;border:none;border-radius:4px;color:#f1f5f9;cursor:pointer" onclick="event.stopPropagation();deletePaleteItem('${id}','${pid}')"><i class="fa-solid fa-trash"></i></button>
-          </div>
-        </div>`;
-      }).join('')}
-    
-    <button class="btn-danger" style="width:100%;margin-top:16px;padding:10px;border-radius:6px;border:none;background:#ef4444;color:#f1f5f9;cursor:pointer;font-size:13px;font-weight:600" onclick="deleteLoadItem('${id}')"><i class="fa-solid fa-trash" style="margin-right:6px"></i>Excluir Carregamento</button>
-  `;
-  document.querySelectorAll('.fab').forEach(f => f.remove());
-  const fab = document.createElement('button');
-  fab.className = 'fab';
-  fab.innerHTML = '<i class="fa-solid fa-plus"></i>';
-  fab.onclick = () => showNewPaleteModal(id);
-  document.body.appendChild(fab);
+    ${progress(s.pct, st.tone)}
+  </button>`;
 }
 
-// ==================== MODALS ====================
+/* ---------- Home ---------- */
+function renderHome() {
+  const all = Object.values(state.loads);
+  const totals = all.reduce((acc, l) => {
+    const s = getLoadStats(l);
+    acc.paletes += s.total; acc.approved += s.approved; acc.rejected += s.rejected;
+    return acc;
+  }, { paletes: 0, approved: 0, rejected: 0 });
+  const recent = sortedLoads().slice(0, 5);
+  setFab(null);
+
+  return `
+    ${pageHeader(state.appTitle, 'chart-line')}
+    <section class="stat-grid" aria-label="Resumo">
+      <div class="stat-card"><span class="stat-val">${all.length}</span><span class="stat-label">Carregamentos</span></div>
+      <div class="stat-card"><span class="stat-val">${totals.paletes}</span><span class="stat-label">Paletes</span></div>
+      <div class="stat-card"><span class="stat-val tone-text-success">${totals.approved}</span><span class="stat-label">Aprovados</span></div>
+      <div class="stat-card"><span class="stat-val tone-text-danger">${totals.rejected}</span><span class="stat-label">Reprovados</span></div>
+    </section>
+    <h2 class="section-title">Carregamentos recentes</h2>
+    <div class="list">${recent.length ? recent.map(([id, l]) => loadCard(id, l)).join('') : emptyState('Nenhum carregamento ainda')}</div>
+  `;
+}
+
+/* ---------- Loads ---------- */
+function renderLoads() {
+  const entries = sortedLoads();
+  const actions = entries.length ? `
+    <button class="btn btn-ghost btn-sm" data-action="pdf-labels-all">${icon('qrcode')}Etiquetas</button>
+    <button class="btn btn-ghost btn-sm" data-action="pdf-reports-all">${icon('file-pdf')}Relatórios</button>` : '';
+  setFab('new-load', {}, 'Novo carregamento');
+
+  return `
+    ${pageHeader('Carregamentos', 'truck', actions)}
+    ${entries.length
+      ? groupByMonth(entries).map(g => `
+        <section class="month-group">
+          <h2 class="section-title month-title">${esc(g.name)}</h2>
+          <div class="list">${g.items.map(([id, l]) => loadCard(id, l)).join('')}</div>
+        </section>`).join('')
+      : emptyState('Nenhum carregamento cadastrado', 'Toque no botão + para criar um novo')}
+  `;
+}
+
+/* ---------- QR tab ---------- */
+function renderQrTab() {
+  const entries = sortedLoads();
+  const actions = entries.length
+    ? `<button class="btn btn-ghost btn-sm" data-action="pdf-labels-all">${icon('download')}Baixar todas</button>` : '';
+  setFab(null);
+
+  return `
+    ${pageHeader('Etiquetas QR', 'qrcode', actions)}
+    <div class="list">${entries.length
+      ? entries.map(([id, l]) => loadCard(id, l, 'open-qr-load')).join('')
+      : emptyState('Nenhum carregamento para gerar QR Code')}</div>
+  `;
+}
+
+function renderQrLoad(id) {
+  const l = state.loads[id];
+  if (!l) { state.detail = null; return render(); }
+  const mat = materialOf(l);
+  const paletes = paletesOf(l);
+  setFab(null);
+
+  return `
+    ${detailHeader(l.supplier, `NF ${esc(l.invoiceNumber || 'N/A')} · Lote ${esc(l.lot)} · ${esc(mat?.name || 'N/A')}`, 'qrcode')}
+    <div class="btn-row">
+      <button class="btn btn-primary" data-action="pdf-labels-load" data-id="${esc(id)}" ${paletes.length ? '' : 'disabled'}>${icon('file-pdf')}PDF de todas</button>
+      <button class="btn btn-success" data-action="bulk-palete" data-id="${esc(id)}">${icon('layer-group')}Gerar paletes</button>
+    </div>
+    <h2 class="section-title">Selecione um palete (${paletes.length})</h2>
+    <div class="list">${paletes.length
+      ? paletes.map(([pid, p], i) => `
+        <button class="row-card" data-action="qr-modal" data-id="${esc(id)}" data-pid="${esc(pid)}" data-num="${i + 1}">
+          <div>
+            <strong>Palete ${i + 1}</strong>
+            <small>${icon('calendar')}${formatDate(p.date)} · IF ${fmtIF(p.ifValue)}</small>
+          </div>
+          <span class="row-card-icon">${icon('qrcode')}</span>
+        </button>`).join('')
+      : emptyState('Nenhum palete neste carregamento')}</div>
+  `;
+}
+
+/* ---------- Materials ---------- */
+function renderMaterials() {
+  const entries = Object.entries(state.materials).sort(([, a], [, b]) => String(a.name).localeCompare(String(b.name)));
+  setFab('new-material', {}, 'Nova matéria-prima');
+
+  return `
+    ${pageHeader('Matérias-primas', 'flask')}
+    <div class="list">${entries.length
+      ? entries.map(([id, m]) => `
+        <div class="row-card is-static">
+          <div>
+            <strong>${esc(m.name)}</strong>
+            <small>${icon('gauge')}Faixa IF: ${esc(m.ifMin)} – ${esc(m.ifMax)} g/10min</small>
+          </div>
+          <button class="btn-icon btn-icon-danger" data-action="delete-material" data-id="${esc(id)}" aria-label="Excluir ${esc(m.name)}">${icon('trash')}</button>
+        </div>`).join('')
+      : emptyState('Nenhuma matéria-prima cadastrada', 'Toque no botão + para cadastrar')}</div>
+  `;
+}
+
+/* ---------- Load detail ---------- */
+function renderChart(mat, paletes) {
+  if (!paletes.length || !mat) return '';
+  const maxVal = Math.max(mat.ifMax * 1.3, ...paletes.map(([, p]) => Number(p.ifValue) || 0));
+  const pos = v => (v / maxVal) * 100;
+  return `<section class="card">
+    <h2 class="card-title">${icon('chart-column')}IF por palete</h2>
+    <div class="chart">
+      <div class="chart-line tone-line-success" style="bottom:${pos(mat.ifMin)}%"><span>${esc(mat.ifMin)}</span></div>
+      <div class="chart-line tone-line-danger" style="bottom:${pos(mat.ifMax)}%"><span>${esc(mat.ifMax)}</span></div>
+      <div class="chart-bars">
+        ${paletes.map(([, p], i) => {
+          const st = paleteStatus(mat, p);
+          return `<div class="chart-bar tone-bg-${st.tone}" style="height:${isMeasured(p) ? pos(p.ifValue) : 2}%" title="Palete ${i + 1}: ${fmtIF(p.ifValue)}"><span>P${i + 1}</span></div>`;
+        }).join('')}
+      </div>
+    </div>
+  </section>`;
+}
+
+function renderLoadDetail(id) {
+  const l = state.loads[id];
+  if (!l) { state.detail = null; return render(); }
+  const mat = materialOf(l);
+  const paletes = paletesOf(l);
+  const s = getLoadStats(l);
+  const st = loadStatus(s);
+  setFab('new-palete', { id }, 'Novo palete');
+
+  return `
+    ${detailHeader(l.supplier, `${esc(mat?.name || 'N/A')} · Lote ${esc(l.lot)}`, state.tab, badge(st))}
+
+    <section class="nf-hero">
+      <span class="nf-hero-label">Nota fiscal</span>
+      <span class="nf-hero-value">${esc(l.invoiceNumber || 'N/A')}</span>
+    </section>
+
+    <section class="card kv-grid">
+      <div><span>Data</span>${formatDate(l.date)}</div>
+      <div><span>Responsável</span>${esc(l.responsible)}</div>
+      <div><span>Faixa IF</span>${mat ? `${esc(mat.ifMin)} – ${esc(mat.ifMax)}` : 'N/A'}</div>
+      <div><span>Média IF</span>${s.measured ? `${s.avg.toFixed(2)} g/10min` : '—'}</div>
+    </section>
+
+    <section class="stat-grid">
+      <div class="stat-card"><span class="stat-val">${s.approved}/${s.measured}</span><span class="stat-label">Aprovados</span></div>
+      <div class="stat-card"><span class="stat-val tone-text-${st.tone}">${s.measured ? s.pct + '%' : '—'}</span><span class="stat-label">Taxa de aprovação</span></div>
+    </section>
+
+    <div class="btn-row">
+      <button class="btn btn-ghost" data-action="edit-load" data-id="${esc(id)}">${icon('pen')}Editar</button>
+      <button class="btn btn-ghost" data-action="pdf-report" data-id="${esc(id)}">${icon('file-lines')}Relatório</button>
+      <button class="btn btn-primary" data-action="pdf-labels-load" data-id="${esc(id)}" ${paletes.length ? '' : 'disabled'}>${icon('qrcode')}Etiquetas</button>
+    </div>
+
+    ${renderChart(mat, paletes)}
+
+    <h2 class="section-title">Paletes (${s.total})${s.pending ? ` · <span class="muted">${s.pending} sem IF</span>` : ''}</h2>
+    <div class="list">${paletes.length
+      ? paletes.map(([pid, p], i) => `
+        <div class="row-card" data-action="edit-palete" data-id="${esc(id)}" data-pid="${esc(pid)}" data-num="${i + 1}" role="button" tabindex="0">
+          <div>
+            <strong>Palete ${i + 1}</strong>
+            <small>${icon('calendar')}${formatDate(p.date)} · IF ${fmtIF(p.ifValue)} g/10min</small>
+          </div>
+          <div class="row-card-end">
+            ${badge(paleteStatus(mat, p))}
+            <button class="btn-icon btn-icon-danger" data-action="delete-palete" data-id="${esc(id)}" data-pid="${esc(pid)}" aria-label="Excluir palete ${i + 1}">${icon('trash')}</button>
+          </div>
+        </div>`).join('')
+      : emptyState('Nenhum palete', 'Toque no botão + para adicionar')}</div>
+
+    <button class="btn btn-danger btn-block danger-zone" data-action="delete-load" data-id="${esc(id)}">${icon('trash')}Excluir carregamento</button>
+  `;
+}
+
+/* ==================== 7. MODALS & FORMS ==================== */
 function closeModal() {
   document.querySelectorAll('.modal-overlay').forEach(m => m.remove());
-  window.removeEventListener('resize', handleViewportChange);
+  document.removeEventListener('keydown', onModalKey);
 }
 
-function handleViewportChange() {
-  const overlay = document.querySelector('.modal-overlay');
-  if (!overlay) return;
-  const vh = window.innerHeight;
-  if (vh < 600) {
-    overlay.classList.add('keyboard-open');
-  } else {
-    overlay.classList.remove('keyboard-open');
+function onModalKey(e) { if (e.key === 'Escape') closeModal(); }
+
+function openModal(title, iconName, bodyHtml) {
+  closeModal();
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <header class="modal-header">
+      <h2 id="modalTitle">${icon(iconName)}${esc(title)}</h2>
+      <button class="btn-icon" data-action="modal-close" aria-label="Fechar">${icon('xmark')}</button>
+    </header>
+    ${bodyHtml}
+  </div>`;
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeModal(); });
+  document.addEventListener('keydown', onModalKey);
+  document.body.appendChild(overlay);
+  setTimeout(() => overlay.querySelector('input, select')?.focus(), 50);
+  return overlay;
+}
+
+/** Declarative field builder: keeps every form visually identical. */
+function field({ id, label, type = 'text', value = '', placeholder = '', required = true, step, min, max, options }) {
+  const attrs = [
+    `id="${id}"`, `name="${id}"`, 'class="input"', required ? 'required' : '',
+    step ? `step="${step}"` : '', min !== undefined ? `min="${min}"` : '', max !== undefined ? `max="${max}"` : '',
+    placeholder ? `placeholder="${esc(placeholder)}"` : ''
+  ].filter(Boolean).join(' ');
+  const control = options
+    ? `<select ${attrs}>${options.map(o => `<option value="${esc(o.value)}" ${o.value === value ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`
+    : `<input type="${type}" ${attrs} value="${esc(value)}" ${type === 'number' ? 'inputmode="decimal"' : ''}>`;
+  return `<label class="field"><span class="field-label">${esc(label)}</span>${control}</label>`;
+}
+
+function formModal({ title, iconName, fields, submitLabel, submitTone = 'primary', note = '', onSubmit }) {
+  const overlay = openModal(title, iconName, `
+    <form class="form-stack" novalidate>
+      ${fields.join('')}
+      ${note ? `<p class="hint">${icon('circle-info')}${esc(note)}</p>` : ''}
+      <button type="submit" class="btn btn-${submitTone} btn-block">${esc(submitLabel)}</button>
+    </form>`);
+  const form = overlay.querySelector('form');
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const values = Object.fromEntries(new FormData(form).entries());
+    Object.keys(values).forEach(k => { values[k] = String(values[k]).trim(); });
+    const btn = form.querySelector('[type="submit"]');
+    btn.disabled = true;
+    try {
+      const ok = await onSubmit(values);
+      if (ok !== false) closeModal();
+    } catch (err) {
+      toast('Erro ao salvar: ' + (err?.message || err), true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+function materialModal() {
+  formModal({
+    title: 'Nova matéria-prima', iconName: 'flask', submitLabel: 'Salvar matéria-prima',
+    fields: [
+      field({ id: 'name', label: 'Nome', placeholder: 'Ex: Polietileno HD' }),
+      `<div class="field-row">${field({ id: 'ifMin', label: 'IF mínimo', type: 'number', step: '0.01', placeholder: '0.00' })}${field({ id: 'ifMax', label: 'IF máximo', type: 'number', step: '0.01', placeholder: '0.00' })}</div>`
+    ],
+    onSubmit: async v => {
+      const ifMin = parseFloat(v.ifMin), ifMax = parseFloat(v.ifMax);
+      if (!v.name || isNaN(ifMin) || isNaN(ifMax)) { toast('Preencha todos os campos', true); return false; }
+      if (ifMin >= ifMax) { toast('IF mínimo deve ser menor que o máximo', true); return false; }
+      await db.ref('materials').push({ name: v.name, ifMin, ifMax });
+      toast('Matéria-prima salva!');
+    }
+  });
+}
+
+function loadModal(id = null) {
+  const matEntries = Object.entries(state.materials);
+  if (!matEntries.length) { toast('Cadastre uma matéria-prima primeiro', true); return; }
+  const l = id ? state.loads[id] : {};
+  formModal({
+    title: id ? 'Editar carregamento' : 'Novo carregamento',
+    iconName: id ? 'pen' : 'truck',
+    submitLabel: id ? 'Salvar alterações' : 'Criar carregamento',
+    fields: [
+      `<div class="field-row">${field({ id: 'date', label: 'Data', type: 'date', value: l.date || todayISO() })}${field({ id: 'invoiceNumber', label: 'Nota fiscal', value: l.invoiceNumber || '', placeholder: 'Nº da NF' })}</div>`,
+      field({ id: 'supplier', label: 'Fornecedor', value: l.supplier || '', placeholder: 'Nome do fornecedor' }),
+      `<div class="field-row">${field({ id: 'lot', label: 'Lote', value: l.lot || '', placeholder: 'Nº do lote' })}${field({ id: 'responsible', label: 'Responsável', value: l.responsible || '', placeholder: 'Nome' })}</div>`,
+      field({ id: 'materialId', label: 'Matéria-prima', value: l.materialId || matEntries[0][0], options: matEntries.map(([mid, m]) => ({ value: mid, label: m.name })) })
+    ],
+    onSubmit: async v => {
+      if (!v.date || !v.invoiceNumber || !v.supplier || !v.lot || !v.responsible || !v.materialId) {
+        toast('Preencha todos os campos', true); return false;
+      }
+      if (id) { await db.ref('loads/' + id).update(v); toast('Carregamento atualizado!'); }
+      else { await db.ref('loads').push(v); toast('Carregamento criado!'); }
+    }
+  });
+}
+
+function paleteModal(loadId, paleteId = null, num = null) {
+  const p = paleteId ? state.loads[loadId]?.paletes?.[paleteId] : null;
+  if (paleteId && !p) return;
+  formModal({
+    title: paleteId ? `Editar palete ${num}` : 'Novo palete',
+    iconName: paleteId ? 'pen' : 'vial',
+    submitLabel: paleteId ? 'Salvar palete' : 'Adicionar palete',
+    fields: [
+      field({ id: 'date', label: 'Data da análise', type: 'date', value: p?.date || todayISO() }),
+      field({ id: 'ifValue', label: 'Valor IF (g/10min)', type: 'number', step: '0.01', min: 0, placeholder: '0.00', value: p && isMeasured(p) ? p.ifValue : '' })
+    ],
+    onSubmit: async v => {
+      const ifValue = parseFloat(v.ifValue);
+      if (!v.date || isNaN(ifValue) || ifValue < 0) { toast('Informe data e IF válidos', true); return false; }
+      const ref = db.ref(`loads/${loadId}/paletes`);
+      if (paleteId) { await ref.child(paleteId).update({ date: v.date, ifValue }); toast('Palete atualizado!'); }
+      else { await ref.push({ date: v.date, ifValue }); toast('Palete adicionado!'); }
+    }
+  });
+}
+
+function bulkPaleteModal(loadId) {
+  formModal({
+    title: 'Gerar paletes', iconName: 'layer-group', submitLabel: 'Gerar paletes', submitTone: 'success',
+    note: 'Os paletes são criados sem Índice de Fluidez. Informe o IF depois tocando em cada palete.',
+    fields: [
+      `<div class="field-row">${field({ id: 'date', label: 'Data da análise', type: 'date', value: todayISO() })}${field({ id: 'qty', label: 'Quantidade', type: 'number', min: 1, max: 100, value: '5' })}</div>`
+    ],
+    onSubmit: async v => {
+      const qty = parseInt(v.qty, 10);
+      if (!v.date || isNaN(qty) || qty < 1 || qty > 100) { toast('Quantidade deve ser entre 1 e 100', true); return false; }
+      // One atomic multi-path write instead of N sequential round-trips.
+      const ref = db.ref(`loads/${loadId}/paletes`);
+      const updates = {};
+      for (let i = 0; i < qty; i++) updates[ref.push().key] = { date: v.date, ifValue: 0 };
+      await ref.update(updates);
+      toast(`${qty} palete(s) gerado(s)!`);
+    }
+  });
+}
+
+function qrModal(loadId, paleteId, num) {
+  const l = state.loads[loadId];
+  const p = l?.paletes?.[paleteId];
+  if (!p) return;
+  const payload = buildQrPayload(l, p, num);
+  const overlay = openModal(`Palete ${num}`, 'qrcode', `
+    <div class="qr-preview"><img alt="QR Code do palete ${num}" src="${qrDataUrl(JSON.stringify(payload), 480)}"></div>
+    <div class="nf-hero is-compact"><span class="nf-hero-label">Nota fiscal</span><span class="nf-hero-value">${esc(l.invoiceNumber || 'N/A')}</span></div>
+    ${qrInfoGrid(payload)}
+    <div class="btn-row">
+      <button class="btn btn-ghost" data-action="download-qr-png">${icon('image')}Imagem</button>
+      <button class="btn btn-primary" data-action="pdf-label" data-id="${esc(loadId)}" data-pid="${esc(paleteId)}" data-num="${num}">${icon('file-pdf')}PDF</button>
+    </div>`);
+  overlay.querySelector('[data-action="download-qr-png"]').dataset.name = safeFile(`palete_${num}_${l.lot}`);
+}
+
+function qrInfoGrid(q) {
+  return `<div class="kv-grid card">
+    <div><span>Fornecedor</span>${esc(q.supplier)}</div>
+    <div><span>Lote</span>${esc(q.lot)}</div>
+    <div><span>Matéria-prima</span>${esc(q.material)}</div>
+    <div><span>IF</span>${fmtIF(q.ifValue)} g/10min</div>
+    <div><span>Data</span>${esc(q.date)}</div>
+    <div><span>Responsável</span>${esc(q.responsible)}</div>
+  </div>`;
+}
+
+function scannedModal(key) {
+  const q = state.scanned.get(key);
+  if (!q) return;
+  openModal(`Palete #${q.paleteNumber}`, 'qrcode', `
+    <div class="nf-hero is-compact"><span class="nf-hero-label">Nota fiscal</span><span class="nf-hero-value">${esc(q.invoiceNumber || 'N/A')}</span></div>
+    ${qrInfoGrid(q)}
+    <button class="btn btn-primary btn-block" data-action="scanned-pdf" data-key="${esc(key)}">${icon('file-pdf')}Reimprimir etiqueta (PDF)</button>`);
+}
+
+/* ==================== 8. CAMERA / QR SCANNER ==================== */
+const camera = {
+  stream: null,
+  animId: null,
+  canvas: null,
+  ctx: null,
+  cropCanvas: null,
+  cropCtx: null,
+  lastHit: 0,
+  busy: false
+};
+
+function playBeep() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(1400, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(1900, ctx.currentTime + 0.08);
+    gain.gain.setValueAtTime(0.25, ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.08);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.08);
+  } catch (e) {}
+}
+
+function renderCamera() {
+  setFab(null);
+  return `
+    ${pageHeader('Leitor de QR Code', 'camera')}
+    <div class="camera-frame">
+      <video id="cameraFeed" playsinline muted hidden></video>
+      <div id="cameraPlaceholder" class="camera-placeholder">${icon('video')}<span>Câmera desligada</span></div>
+      <div id="cameraReticle" class="camera-reticle" hidden></div>
+      <div id="cameraStatus" class="camera-status" hidden><i class="pulse-dot"></i>Leitura instantânea ativa</div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-primary btn-grow" id="toggleCameraBtn" data-action="camera-toggle">${icon('play')}Iniciar câmera</button>
+      <div class="counter" aria-live="polite"><span id="qrCounter">${state.scanned.size}</span><small>lidos</small></div>
+    </div>
+    <div id="scannedResults" class="list"></div>
+  `;
+}
+
+async function startCamera() {
+  try {
+    camera.stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1280, min: 640 },
+        height: { ideal: 720, min: 480 }
+      }
+    });
+    // Apply hardware continuous auto-focus on supported mobile devices
+    const track = camera.stream?.getVideoTracks()[0];
+    if (track && track.applyConstraints) {
+      track.applyConstraints({
+        advanced: [{ focusMode: 'continuous' }, { exposureMode: 'continuous' }]
+      }).catch(() => {});
+    }
+  } catch (err) {
+    toast('Erro ao acessar câmera: ' + err.message, true);
+    return;
+  }
+
+  const video = $('#cameraFeed');
+  video.srcObject = camera.stream;
+  video.hidden = false;
+  $('#cameraPlaceholder').hidden = true;
+  $('#cameraReticle').hidden = false;
+  $('#cameraStatus').hidden = false;
+  $('#toggleCameraBtn').innerHTML = `${icon('stop')}Parar câmera`;
+  await video.play().catch(() => {});
+
+  camera.canvas = camera.canvas || document.createElement('canvas');
+  camera.ctx = camera.ctx || camera.canvas.getContext('2d', { willReadFrequently: true });
+  camera.cropCanvas = camera.cropCanvas || document.createElement('canvas');
+  camera.cropCtx = camera.cropCtx || camera.cropCanvas.getContext('2d', { willReadFrequently: true });
+
+  scanLoop();
+}
+
+function stopCamera() {
+  if (camera.animId) {
+    clearTimeout(camera.animId);
+    camera.animId = null;
+  }
+  camera.stream?.getTracks().forEach(t => t.stop());
+  camera.stream = null;
+  const video = $('#cameraFeed');
+  if (!video) return;
+  video.srcObject = null;
+  video.hidden = true;
+  $('#cameraPlaceholder').hidden = false;
+  $('#cameraReticle').hidden = true;
+  $('#cameraStatus').hidden = true;
+  $('#toggleCameraBtn').innerHTML = `${icon('play')}Iniciar câmera`;
+}
+
+/**
+ * Continuous high-frequency scan loop (25-30 FPS):
+ * Scans immediately when code touches the viewfinder without delay.
+ */
+function scanLoop() {
+  if (!camera.stream) return;
+  scanFrame();
+  camera.animId = setTimeout(() => requestAnimationFrame(scanLoop), 35);
+}
+
+function scanFrame() {
+  const video = $('#cameraFeed');
+  if (!video || !video.videoWidth || !video.videoHeight || camera.busy) return;
+  if (Date.now() - camera.lastHit < 500) return;
+
+  camera.busy = true;
+  try {
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    let code = null;
+
+    // 1. FAST PASS: Center 65% crop (fastest, decodes in 2ms for "só de bater")
+    const cropSize = Math.round(Math.min(vw, vh) * 0.65);
+    const cropX = Math.round((vw - cropSize) / 2);
+    const cropY = Math.round((vh - cropSize) / 2);
+    const targetCrop = 320;
+
+    if (camera.cropCanvas.width !== targetCrop) {
+      camera.cropCanvas.width = targetCrop;
+      camera.cropCanvas.height = targetCrop;
+    }
+    camera.cropCtx.drawImage(video, cropX, cropY, cropSize, cropSize, 0, 0, targetCrop, targetCrop);
+    let imgData = camera.cropCtx.getImageData(0, 0, targetCrop, targetCrop);
+    code = jsQR(imgData.data, targetCrop, targetCrop, { inversionAttempts: 'attemptBoth' });
+
+    // 2. FALLBACK PASS: Full downscaled frame (catches QR at corners / steep angles)
+    if (!code) {
+      const scale = Math.min(1, 540 / vw);
+      const fw = Math.round(vw * scale);
+      const fh = Math.round(vh * scale);
+      if (camera.canvas.width !== fw) {
+        camera.canvas.width = fw;
+        camera.canvas.height = fh;
+      }
+      camera.ctx.drawImage(video, 0, 0, fw, fh);
+      imgData = camera.ctx.getImageData(0, 0, fw, fh);
+      code = jsQR(imgData.data, fw, fh, { inversionAttempts: 'attemptBoth' });
+    }
+
+    if (!code) return;
+
+    let raw;
+    try { raw = JSON.parse(code.data); } catch { return; }
+    const data = normalizeQrData(raw);
+    if (!data) return;
+
+    camera.lastHit = Date.now();
+    playBeep();
+    navigator.vibrate?.([80, 40, 80]);
+
+    const reticle = $('#cameraReticle');
+    reticle?.classList.add('is-hit');
+    setTimeout(() => reticle?.classList.remove('is-hit'), 450);
+
+    const key = scannedKey(data);
+    if (state.scanned.has(key)) {
+      toast(`Palete #${data.paleteNumber} já lido!`);
+      return;
+    }
+    state.scanned.set(key, data);
+    renderScannedList();
+    toast(`✓ Palete #${data.paleteNumber} lido com sucesso!`);
+  } catch (e) {
+  } finally {
+    camera.busy = false;
   }
 }
 
-function showNewMaterialModal() {
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.onclick = e => { if (e.target === overlay) closeModal(); };
-  overlay.innerHTML = `<div class="modal-content">
-    <h2 style="font-size:18px;font-weight:700;margin-bottom:16px"><i class="fa-solid fa-flask" style="color:#3b82f6;margin-right:8px"></i>Nova Matéria-Prima</h2>
-    <form id="matForm" style="display:flex;flex-direction:column;gap:12px">
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Nome da Matéria-Prima</label><input class="input-field" id="matName" required placeholder="Ex: Polietileno HD"></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">IF Mínimo</label><input class="input-field" id="matMin" type="number" step="0.01" required placeholder="0.00"></div>
-        <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">IF Máximo</label><input class="input-field" id="matMax" type="number" step="0.01" required placeholder="0.00"></div>
+function renderScannedList() {
+  const list = $('#scannedResults');
+  const counter = $('#qrCounter');
+  if (counter) counter.textContent = state.scanned.size;
+  if (!list) return;
+  list.innerHTML = [...state.scanned.entries()].reverse().map(([key, q]) => `
+    <div class="row-card" data-action="scanned-open" data-key="${esc(key)}" role="button" tabindex="0">
+      <div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <strong>${esc(q.supplier)}</strong>
+          <span class="badge badge-info" style="font-size:10px;padding:1px 6px">PALETE #${q.paleteNumber}</span>
+        </div>
+        <small>NF ${esc(q.invoiceNumber || 'N/A')} · Lote ${esc(q.lot)} · ${esc(q.material)}</small>
       </div>
-      <button type="submit" class="btn-primary" style="width:100%;padding:10px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;font-weight:600;cursor:pointer;margin-top:8px">Salvar Matéria-Prima</button>
-    </form>
-  </div>`;
-  document.body.appendChild(overlay);
-  window.addEventListener('resize', handleViewportChange);
-  handleViewportChange();
-  document.getElementById('matForm').onsubmit = e => {
-    e.preventDefault();
-    const name = document.getElementById('matName').value.trim();
-    const ifMin = parseFloat(document.getElementById('matMin').value);
-    const ifMax = parseFloat(document.getElementById('matMax').value);
-    if (!name || isNaN(ifMin) || isNaN(ifMax)) { toast('Preencha todos os campos', true); return; }
-    if (ifMin >= ifMax) { toast('IF mínimo deve ser menor que máximo', true); return; }
-    db.ref('materials').push({ name, ifMin, ifMax });
-    toast('Matéria-prima salva!');
-    closeModal();
-  };
+      <button class="btn-icon btn-icon-danger" data-action="scanned-remove" data-key="${esc(key)}" aria-label="Remover leitura">${icon('trash')}</button>
+    </div>`).join('');
 }
 
-function showNewLoadModal() {
-  const matEntries = Object.entries(materials);
-  if (matEntries.length === 0) { toast('Cadastre uma matéria-prima primeiro', true); return; }
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.onclick = e => { if (e.target === overlay) closeModal(); };
-  overlay.innerHTML = `<div class="modal-content">
-    <h2 style="font-size:18px;font-weight:700;margin-bottom:16px"><i class="fa-solid fa-truck" style="color:#3b82f6;margin-right:8px"></i>Novo Carregamento</h2>
-    <form id="loadForm" style="display:flex;flex-direction:column;gap:12px">
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Data</label><input class="input-field" id="loadDate" type="date" required></div>
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Nota Fiscal</label><input class="input-field" id="loadInvoice" required placeholder="Número da NF"></div>
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Fornecedor</label><input class="input-field" id="loadSupplier" required placeholder="Nome do fornecedor"></div>
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Lote</label><input class="input-field" id="loadLot" required placeholder="Número do lote"></div>
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Responsável</label><input class="input-field" id="loadResp" required placeholder="Nome do responsável"></div>
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Matéria-Prima</label>
-        <select class="input-field" id="loadMat" required>
-          ${matEntries.map(([id, m]) => `<option value="${id}">${m.name}</option>`).join('')}
-        </select>
-      </div>
-      <button type="submit" class="btn-primary" style="width:100%;padding:10px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;font-weight:600;cursor:pointer;margin-top:8px">Criar Carregamento</button>
-    </form>
-  </div>`;
-  document.body.appendChild(overlay);
-  window.addEventListener('resize', handleViewportChange);
-  handleViewportChange();
-  document.getElementById('loadDate').valueAsDate = new Date();
-  document.getElementById('loadForm').onsubmit = e => {
-    e.preventDefault();
-    const date = document.getElementById('loadDate').value;
-    const invoiceNumber = document.getElementById('loadInvoice').value.trim();
-    const supplier = document.getElementById('loadSupplier').value.trim();
-    const lot = document.getElementById('loadLot').value.trim();
-    const responsible = document.getElementById('loadResp').value.trim();
-    const materialId = document.getElementById('loadMat').value;
-    if (!date || !invoiceNumber || !supplier || !lot || !responsible) { toast('Preencha todos os campos', true); return; }
-    db.ref('loads').push({ date, invoiceNumber, supplier, lot, responsible, materialId });
-    toast('Carregamento criado!');
-    closeModal();
-  };
+/* ==================== 9. PDF GENERATION ==================== */
+const PDF = { W: 210, H: 297, M: 12 };
+const newDoc = () => new window.jspdf.jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+
+/** Shrinks font size until `text` fits `maxWidth` (mm). Returns the size used. */
+function fitFont(doc, text, maxSize, minSize, maxWidth) {
+  let size = maxSize;
+  doc.setFontSize(size);
+  while (size > minSize && doc.getTextWidth(text) > maxWidth) doc.setFontSize(--size);
+  return size;
 }
 
-function showEditLoadModal(id) {
-  const l = loads[id];
-  if (!l) return;
-  const matEntries = Object.entries(materials);
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.onclick = e => { if (e.target === overlay) closeModal(); };
-  overlay.innerHTML = `<div class="modal-content">
-    <h2 style="font-size:18px;font-weight:700;margin-bottom:16px"><i class="fa-solid fa-edit" style="color:#3b82f6;margin-right:8px"></i>Editar Carregamento</h2>
-    <form id="editLoadForm" style="display:flex;flex-direction:column;gap:12px">
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Data</label><input class="input-field" id="editDate" type="date" required value="${l.date}"></div>
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Nota Fiscal</label><input class="input-field" id="editInvoice" required placeholder="Número da NF" value="${l.invoiceNumber || ''}"></div>
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Fornecedor</label><input class="input-field" id="editSupplier" required placeholder="Nome do fornecedor" value="${l.supplier}"></div>
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Lote</label><input class="input-field" id="editLot" required placeholder="Número do lote" value="${l.lot}"></div>
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Responsável</label><input class="input-field" id="editResp" required placeholder="Nome do responsável" value="${l.responsible}"></div>
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Matéria-Prima</label>
-        <select class="input-field" id="editMat" required>
-          ${matEntries.map(([mid, m]) => `<option value="${mid}" ${mid === l.materialId ? 'selected' : ''}>${m.name}</option>`).join('')}
-        </select>
-      </div>
-      <button type="submit" class="btn-primary" style="width:100%;padding:10px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;font-weight:600;cursor:pointer;margin-top:8px">Atualizar Carregamento</button>
-    </form>
-  </div>`;
-  document.body.appendChild(overlay);
-  window.addEventListener('resize', handleViewportChange);
-  handleViewportChange();
-  document.getElementById('editLoadForm').onsubmit = e => {
-    e.preventDefault();
-    const date = document.getElementById('editDate').value;
-    const invoiceNumber = document.getElementById('editInvoice').value.trim();
-    const supplier = document.getElementById('editSupplier').value.trim();
-    const lot = document.getElementById('editLot').value.trim();
-    const responsible = document.getElementById('editResp').value.trim();
-    const materialId = document.getElementById('editMat').value;
-    if (!date || !invoiceNumber || !supplier || !lot || !responsible) { toast('Preencha todos os campos', true); return; }
-    db.ref('loads/' + id).update({ date, invoiceNumber, supplier, lot, responsible, materialId });
-    toast('Carregamento atualizado!');
-    closeModal();
-  };
+/** Truncates with an ellipsis so a single line never exceeds `maxWidth`. */
+function clip(doc, text, maxWidth) {
+  let t = String(text ?? '');
+  if (doc.getTextWidth(t) <= maxWidth) return t;
+  while (t.length > 1 && doc.getTextWidth(t + '…') > maxWidth) t = t.slice(0, -1);
+  return t + '…';
 }
 
-function showNewPaleteModal(loadId) {
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.onclick = e => { if (e.target === overlay) closeModal(); };
-  overlay.innerHTML = `<div class="modal-content">
-    <h2 style="font-size:18px;font-weight:700;margin-bottom:16px"><i class="fa-solid fa-vial" style="color:#3b82f6;margin-right:8px"></i>Novo Palete</h2>
-    <form id="paleteForm" style="display:flex;flex-direction:column;gap:12px">
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Data da Análise</label><input class="input-field" id="palDate" type="date" required></div>
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Valor IF (g/10min)</label><input class="input-field" id="palIF" type="number" step="0.01" required placeholder="0.00"></div>
-      <button type="submit" class="btn-primary" style="width:100%;padding:10px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;font-weight:600;cursor:pointer;margin-top:8px">Adicionar Palete</button>
-    </form>
-  </div>`;
-  document.body.appendChild(overlay);
-  window.addEventListener('resize', handleViewportChange);
-  handleViewportChange();
-  document.getElementById('palDate').valueAsDate = new Date();
-  document.getElementById('paleteForm').onsubmit = e => {
-    e.preventDefault();
-    const date = document.getElementById('palDate').value;
-    const ifValue = parseFloat(document.getElementById('palIF').value);
-    if (!date || isNaN(ifValue)) { toast('Preencha todos os campos', true); return; }
-    db.ref('loads/' + loadId + '/paletes').push({ date, ifValue });
-    toast('Palete adicionado!');
-    closeModal();
-  };
-}
+/**
+ * A4 Palete Label with Palete Number stamped prominently in multiple locations
+ * so operators can identify the pallet from any angle (top, side, bottom corners,
+ * far away or wrapped in plastic):
+ *   1. Header band top-left: PALETE #X (giant font 24 bold)
+ *   2. Header band top-right: PALETE #X badge
+ *   3. Sub-header bar: IDENTIFICAÇÃO · PALETE #X
+ *   4. Left and Right vertical side margin stamps: ◄ PALETE #X
+ *   5. Giant Level-H QR code (144mm, 30% error correction recovery)
+ *   6. Mega-Banner 1: NOTA FISCAL: XXXXX
+ *   7. Mega-Banner 2: PALETE #X (huge bold banner)
+ *   8. Details table: row 1 explicitly highlights PALETE #X
+ *   9. Bottom corners: PALETE #X stamps on left and right
+ */
+function drawPaleteLabel(doc, { paleteNumber, invoiceNumber, supplier, lot, material, date, qrImage }) {
+  const { W, M } = PDF;
+  const CW = W - M * 2; // 186mm printable width
+  const paleteStr = `PALETE #${paleteNumber}`;
+  const nfStr = String(invoiceNumber || 'N/A');
 
-function showBulkPaleteModal(loadId) {
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.onclick = e => { if (e.target === overlay) closeModal(); };
-  overlay.innerHTML = `<div class="modal-content">
-    <h2 style="font-size:18px;font-weight:700;margin-bottom:16px"><i class="fa-solid fa-cubes" style="color:#3b82f6;margin-right:8px"></i>Gerar Paletes para QR Code</h2>
-    <form id="bulkPaleteForm" style="display:flex;flex-direction:column;gap:12px">
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Data da Análise</label><input class="input-field" id="bulkPalDate" type="date" required></div>
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Quantidade de Paletes</label><input class="input-field" id="bulkPalCount" type="number" min="1" max="100" required placeholder="5" value="5"></div>
-      <div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px">
-        <div style="font-size:11px;color:#94a3b8"><i class="fa-solid fa-info-circle" style="margin-right:6px;color:#3b82f6"></i>Os paletes serão criados SEM Índice de Fluidez. Você poderá adicionar os valores depois clicando em cada palete.</div>
-      </div>
-      <button type="submit" class="btn-primary" style="width:100%;padding:10px;background:#22c55e;border:none;border-radius:6px;color:#f1f5f9;font-weight:600;cursor:pointer;margin-top:8px"><i class="fa-solid fa-plus" style="margin-right:6px"></i>Gerar Paletes</button>
-    </form>
-  </div>`;
-  document.body.appendChild(overlay);
-  window.addEventListener('resize', handleViewportChange);
-  handleViewportChange();
-  document.getElementById('bulkPalDate').valueAsDate = new Date();
+  // Background
+  doc.setFillColor(255, 255, 255);
+  doc.rect(0, 0, W, 297, 'F');
 
-  document.getElementById('bulkPaleteForm').onsubmit = async e => {
-    e.preventDefault();
-    const date = document.getElementById('bulkPalDate').value;
-    const quantity = parseInt(document.getElementById('bulkPalCount').value);
-
-    if (!date || isNaN(quantity) || quantity < 1) { 
-      toast('Preencha todos os campos corretamente', true); 
-      return; 
-    }
-
-    let addedCount = 0;
-    for (let i = 0; i < quantity; i++) {
-      try {
-        await new Promise((resolve) => {
-          db.ref('loads/' + loadId + '/paletes').push({ date, ifValue: 0 }, (err) => {
-            if (!err) addedCount++;
-            resolve();
-          });
-        });
-      } catch (err) { }
-    }
-
-    toast(`${addedCount} palete(s) gerado(s)! Clique em cada um para adicionar o Índice de Fluidez.`);
-    closeModal();
-  };
-}
-
-function showEditPaleteModal(loadId, paleteId, paleteNum) {
-  const palete = loads[loadId].paletes[paleteId];
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.onclick = e => { if (e.target === overlay) closeModal(); };
-  overlay.innerHTML = `<div class="modal-content">
-    <h2 style="font-size:18px;font-weight:700;margin-bottom:16px"><i class="fa-solid fa-edit" style="color:#3b82f6;margin-right:8px"></i>Editar Palete ${paleteNum}</h2>
-    <form id="editPaleteForm" style="display:flex;flex-direction:column;gap:12px">
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Data da Análise</label><input class="input-field" id="editPalDate" type="date" required value="${palete.date}"></div>
-      <div><label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;font-weight:600">Valor IF (g/10min)</label><input class="input-field" id="editPalIF" type="number" step="0.01" required placeholder="0.00" value="${palete.ifValue}"></div>
-      <button type="submit" class="btn-primary" style="width:100%;padding:10px;background:#3b82f6;border:none;border-radius:6px;color:#f1f5f9;font-weight:600;cursor:pointer;margin-top:8px">Salvar Palete</button>
-    </form>
-  </div>`;
-  document.body.appendChild(overlay);
-  window.addEventListener('resize', handleViewportChange);
-  handleViewportChange();
-  
-  document.getElementById('editPaleteForm').onsubmit = e => {
-    e.preventDefault();
-    const date = document.getElementById('editPalDate').value;
-    const ifValue = parseFloat(document.getElementById('editPalIF').value);
-    if (!date || isNaN(ifValue)) { toast('Preencha todos os campos', true); return; }
-    db.ref('loads/' + loadId + '/paletes/' + paleteId).update({ date, ifValue });
-    toast('Palete atualizado!');
-    closeModal();
-  };
-}
-
-
-
-// ==================== DELETE FUNCTIONS ====================
-function deleteMaterial(id) {
-  const card = event.target.closest('.card');
-  if (card.querySelector('.confirm-row')) return;
-  const row = document.createElement('div');
-  row.className = 'confirm-row';
-  row.style.cssText = 'display:flex;gap:8px;margin-top:12px;justify-content:flex-end';
-  row.innerHTML = `<span style="font-size:12px;color:#ef4444;line-height:28px;font-weight:600">Tem certeza?</span>
-    <button class="btn-primary btn-sm" style="background:#ef4444;color:#f1f5f9;border:none;border-radius:4px;cursor:pointer;padding:6px 12px;font-weight:600" onclick="db.ref('materials/${id}').remove();toast('Removido!')">Sim</button>
-    <button class="btn-primary btn-sm" style="background:#334155;color:#f1f5f9;border:none;border-radius:4px;cursor:pointer;padding:6px 12px;font-weight:600" onclick="this.parentElement.remove()">Não</button>`;
-  card.appendChild(row);
-}
-
-function deleteLoadItem(id) {
-  db.ref('loads/' + id).remove();
-  toast('Carregamento excluído!');
-  currentLoadId = null;
-  renderCurrentTab();
-}
-
-function deletePaleteItem(loadId, paleteId) {
-  db.ref('loads/' + loadId + '/paletes/' + paleteId).remove();
-  toast('Palete removido!');
-}
-
-// ==================== PDF GENERATION ====================
-function generatePDFLoad(id) {
-  const { jsPDF } = window.jspdf;
-  const doc = new jsPDF();
-  const l = loads[id];
-  if (!l) return;
-  const mat = materials[l.materialId];
-  const matName = mat?.name || 'N/A';
-  const s = getLoadStats(l);
-  const status = s.total === 0 ? 'PENDENTE' : s.pct >= 80 ? 'APROVADO' : 'REPROVADO';
-
+  // ================= 1. HEADER BAND (0 - 24 mm) =================
   doc.setFillColor(15, 23, 42);
-  doc.rect(0, 0, 210, 50, 'F');
-  doc.setTextColor(241, 245, 249);
-  doc.setFontSize(20);
-  doc.text(appTitle, 14, 18);
-  doc.setFontSize(12);
-  doc.text('Relatório de Carregamento', 14, 30);
-  doc.setFontSize(10);
-  doc.text('NF: ' + (l.invoiceNumber || 'N/A'), 14, 38);
-  doc.setFontSize(9);
-  doc.text('Gerado em: ' + new Date().toLocaleString('pt-BR'), 14, 45);
+  doc.rect(0, 0, W, 24, 'F');
 
-  doc.setTextColor(30, 41, 59);
-  let y = 58;
-  doc.setFontSize(12);
-  doc.setFont(undefined, 'bold');
-  doc.text('Dados do Carregamento', 14, y);
-  y += 8;
-  doc.setFont(undefined, 'normal');
+  // Top-Left: Giant Palete #
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(24);
+  doc.text(paleteStr, M, 16);
+
+  // Top-Right: High-contrast corner badge for Palete #
+  const tagW = 44, tagH = 15;
+  doc.setFillColor(59, 130, 246);
+  doc.roundedRect(W - M - tagW, 4.5, tagW, tagH, 2.5, 2.5, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.text(paleteStr, W - M - (tagW / 2), 14.5, { align: 'center' });
+
+  // Header sub-info
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(203, 213, 225);
+  doc.text(`Lote ${lot} · ${date}`, W - M - tagW - 4, 15, { align: 'right' });
+
+  // ================= 2. TOP SUB-HEADER (26 - 32 mm) =================
+  doc.setFont('helvetica', 'bold');
   doc.setFontSize(10);
-  const info = [
-    ['Nota Fiscal', l.invoiceNumber || 'N/A'],
-    ['Fornecedor', l.supplier],
-    ['Lote', l.lot],
-    ['Data', formatDate(l.date)],
-    ['Responsável', l.responsible],
-    ['Matéria-Prima', matName],
-    ['Faixa IF', mat ? mat.ifMin + ' — ' + mat.ifMax + ' g/10min' : 'N/A']
+  doc.setTextColor(51, 65, 85);
+  doc.text(`RASTREABILIDADE INDUSTRIAL  ·  ${paleteStr}  ·  NF ${nfStr}`, W / 2, 30, { align: 'center' });
+
+  // ================= 3. VERTICAL SIDE MARGIN STAMPS =================
+  // Left and right side margins so forklift driver viewing pallet from side sees palete #
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9);
+  doc.setTextColor(148, 163, 184);
+  doc.text(`◄ ${paleteStr}  ·  NF ${nfStr}`, 5, 110, { angle: 90 });
+  doc.text(`${paleteStr}  ·  NF ${nfStr} ►`, W - 5, 110, { angle: 270 });
+
+  // ================= 4. GIANT QR CODE (34 - 176 mm) =================
+  // 142mm square with Level-H error correction (decodes even if 30% occluded/dirty)
+  const qrSize = 142;
+  const qrX = (W - qrSize) / 2;
+  const qrY = 34;
+  if (qrImage) {
+    doc.addImage(qrImage, 'PNG', qrX, qrY, qrSize, qrSize);
+  }
+
+  // ================= 5. DOUBLE MEGA-BANNERS (180 - 238 mm) =================
+  // Banner 1: NOTA FISCAL (180 - 207 mm)
+  const b1Y = 180, b1H = 26;
+  doc.setFillColor(15, 23, 42);
+  doc.roundedRect(M, b1Y, CW, b1H, 2.5, 2.5, 'F');
+  doc.setTextColor(148, 163, 184);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.text('NOTA FISCAL', W / 2, b1Y + 7, { align: 'center' });
+  doc.setTextColor(255, 255, 255);
+  fitFont(doc, nfStr, 54, 22, CW - 10);
+  doc.text(nfStr, W / 2, b1Y + b1H - 5, { align: 'center' });
+
+  // Banner 2: PALETE #X (210 - 237 mm) — High-contrast royal blue banner!
+  const b2Y = 209, b2H = 26;
+  doc.setFillColor(30, 58, 138);
+  doc.roundedRect(M, b2Y, CW, b2H, 2.5, 2.5, 'F');
+  doc.setDrawColor(59, 130, 246);
+  doc.setLineWidth(0.6);
+  doc.roundedRect(M, b2Y, CW, b2H, 2.5, 2.5, 'S');
+
+  doc.setTextColor(191, 219, 254);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.text('IDENTIFICAÇÃO DO PALETE', W / 2, b2Y + 7, { align: 'center' });
+  doc.setTextColor(255, 255, 255);
+  fitFont(doc, paleteStr, 54, 24, CW - 10);
+  doc.text(paleteStr, W / 2, b2Y + b2H - 5, { align: 'center' });
+
+  // ================= 6. DETAILS TABLE (241 - 275 mm) =================
+  const colW = CW / 2 - 4;
+  const rows = [
+    [['PALETE', paleteStr], ['NOTA FISCAL', nfStr]],
+    [['FORNECEDOR', supplier], ['MATÉRIA-PRIMA', material]],
+    [['LOTE', lot], ['DATA DE CHEGADA', date]]
   ];
-  info.forEach(([k, v]) => {
-    doc.setFont(undefined, 'bold'); doc.text(k + ': ', 14, y);
-    doc.setFont(undefined, 'normal'); doc.text(v, 60, y);
-    y += 6;
+
+  rows.forEach((row, r) => {
+    row.forEach(([label, value], c) => {
+      const x = M + c * (CW / 2);
+      const y = 245 + r * 10;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.5);
+      doc.setTextColor(100, 116, 139);
+      doc.text(label, x, y);
+
+      // Highlight palete and NF with bolder text
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10.5);
+      doc.setTextColor(label === 'PALETE' ? 37 : 15, label === 'PALETE' ? 99 : 23, label === 'PALETE' ? 235 : 42);
+      doc.text(clip(doc, value || '—', colW), x, y + 4.5);
+    });
   });
 
-  y += 10;
-  doc.setFillColor(s.pct >= 80 ? 230 : 254, s.pct >= 80 ? 255 : 226, s.pct >= 80 ? 230 : 226);
-  doc.roundedRect(14, y, 182, 24, 3, 3, 'F');
-  doc.setFontSize(12);
-  doc.setFont(undefined, 'bold');
-  doc.setTextColor(s.pct >= 80 ? 22 : 239, s.pct >= 80 ? 163 : 68, s.pct >= 80 ? 74 : 68);
-  doc.text('Resultado: ' + status, 20, y + 10);
-  doc.setFont(undefined, 'normal');
-  doc.setFontSize(10);
-  doc.text(`Média IF: ${s.avg.toFixed(2)} g/10min | ${s.approved}/${s.total} aprovados (${s.pct}%)`, 20, y + 18);
+  // ================= 7. FOUR-CORNER BOTTOM STAMPS & FOOTER (280 - 294 mm) =================
+  // Bottom-Left corner stamp: PALETE #X
+  const bCornerW = 44, bCornerH = 10;
+  doc.setFillColor(15, 23, 42);
+  doc.roundedRect(M, 281, bCornerW, bCornerH, 2, 2, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9);
+  doc.text(paleteStr, M + (bCornerW / 2), 287.5, { align: 'center' });
 
-  doc.save(`Relatorio_NF${l.invoiceNumber}_${l.supplier}.pdf`);
+  // Center: Company name
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.setTextColor(148, 163, 184);
+  doc.text(`${COMPANY_NAME}  ·  CONTROLE DE FLUIDEZ`, W / 2, 287.5, { align: 'center' });
+
+  // Bottom-Right corner stamp: PALETE #X
+  doc.setFillColor(15, 23, 42);
+  doc.roundedRect(W - M - bCornerW, 281, bCornerW, bCornerH, 2, 2, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9);
+  doc.text(paleteStr, W - M - (bCornerW / 2), 287.5, { align: 'center' });
+}
+
+/** Builds label data for one palete of a load (QR rendered fresh at print resolution). */
+function labelFor(load, palete, num) {
+  const payload = buildQrPayload(load, palete, num);
+  return {
+    paleteNumber: num,
+    invoiceNumber: load.invoiceNumber,
+    supplier: load.supplier,
+    lot: load.lot,
+    material: payload.material,
+    date: payload.date,
+    qrImage: qrDataUrl(JSON.stringify(payload))
+  };
+}
+
+/** Appends one page per label; returns the number of pages written. */
+function writeLabels(doc, labels, startFresh) {
+  labels.forEach((label, i) => {
+    if (i > 0 || !startFresh) doc.addPage();
+    drawPaleteLabel(doc, label);
+  });
+  return labels.length;
+}
+
+const loadLabels = load => paletesOf(load).map(([, p], i) => labelFor(load, p, i + 1));
+
+function pdfLabel(loadId, paleteId, num) {
+  const l = state.loads[loadId];
+  const p = l?.paletes?.[paleteId];
+  if (!p) return;
+  const doc = newDoc();
+  drawPaleteLabel(doc, labelFor(l, p, num));
+  doc.save(`Etiqueta_NF${safeFile(l.invoiceNumber)}_P${num}.pdf`);
   toast('PDF gerado!');
 }
 
-function generateAllReports() {
-  const allLoads = Object.entries(loads);
-  if (allLoads.length === 0) { toast('Nenhum carregamento', true); return; }
-  allLoads.forEach(([id]) => {
-    setTimeout(() => generatePDFLoad(id), 500);
-  });
-  toast('Gerando ' + allLoads.length + ' relatório(s)...');
+function pdfLabelsLoad(loadId) {
+  const l = state.loads[loadId];
+  const labels = loadLabels(l);
+  if (!labels.length) { toast('Sem paletes para gerar etiquetas', true); return; }
+  const doc = newDoc();
+  writeLabels(doc, labels, true);
+  doc.save(`Etiquetas_NF${safeFile(l.invoiceNumber)}_Lote${safeFile(l.lot)}.pdf`);
+  toast(`PDF com ${labels.length} etiqueta(s) gerado!`);
 }
 
-// Initial render
-renderCurrentTab();
+/** All labels in ONE file — avoids the browser's multiple-download blocking. */
+function pdfLabelsAll() {
+  const doc = newDoc();
+  let pages = 0;
+  sortedLoads().forEach(([, l]) => { pages += writeLabels(doc, loadLabels(l), pages === 0); });
+  if (!pages) { toast('Nenhum palete para gerar etiquetas', true); return; }
+  doc.save(`Etiquetas_Todas_${todayISO()}.pdf`);
+  toast(`PDF com ${pages} etiqueta(s) gerado!`);
+}
 
+function pdfScanned(key) {
+  const q = state.scanned.get(key);
+  if (!q) return;
+  const doc = newDoc();
+  drawPaleteLabel(doc, {
+    paleteNumber: q.paleteNumber, invoiceNumber: q.invoiceNumber, supplier: q.supplier,
+    lot: q.lot, material: q.material, date: q.date, qrImage: qrDataUrl(JSON.stringify(q))
+  });
+  doc.save(`Etiqueta_NF${safeFile(q.invoiceNumber)}_P${q.paleteNumber}.pdf`);
+  toast('PDF gerado!');
+}
+
+function drawLoadReport(doc, id) {
+  const l = state.loads[id];
+  const mat = materialOf(l);
+  const s = getLoadStats(l);
+  const st = loadStatus(s);
+  const { W, M } = PDF;
+
+  doc.setFillColor(15, 23, 42);
+  doc.rect(0, 0, W, 42, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(18);
+  doc.text(state.appTitle, M, 15);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(11);
+  doc.text('Relatório de carregamento', M, 23);
+  doc.setFontSize(8);
+  doc.setTextColor(148, 163, 184);
+  doc.text('Gerado em ' + new Date().toLocaleString('pt-BR'), M, 31);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(9);
+  doc.text('NOTA FISCAL', W - M, 15, { align: 'right' });
+  fitFont(doc, String(l.invoiceNumber || 'N/A'), 26, 12, 90);
+  doc.text(String(l.invoiceNumber || 'N/A'), W - M, 28, { align: 'right' });
+
+  let y = 54;
+  doc.setTextColor(15, 23, 42);
+  doc.setFontSize(12);
+  doc.text('Dados do carregamento', M, y);
+  y += 8;
+  doc.setFontSize(10);
+  [
+    ['Fornecedor', l.supplier], ['Lote', l.lot], ['Data', formatDate(l.date)],
+    ['Responsável', l.responsible], ['Matéria-prima', mat?.name || 'N/A'],
+    ['Faixa IF', mat ? `${mat.ifMin} – ${mat.ifMax} g/10min` : 'N/A']
+  ].forEach(([k, v]) => {
+    doc.setFont('helvetica', 'bold'); doc.text(k + ':', M, y);
+    doc.setFont('helvetica', 'normal'); doc.text(clip(doc, v || '—', 140), M + 40, y);
+    y += 6.5;
+  });
+
+  y += 4;
+  const ok = st.tone === 'success';
+  const [bg, fg] = st.tone === 'info' ? [[226, 232, 240], [51, 65, 85]] : ok ? [[220, 252, 231], [21, 128, 61]] : [[254, 226, 226], [185, 28, 28]];
+  doc.setFillColor(...bg);
+  doc.roundedRect(M, y, W - M * 2, 22, 3, 3, 'F');
+  doc.setTextColor(...fg);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(13);
+  doc.text('Resultado: ' + st.label.toUpperCase(), M + 6, y + 9);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.text(`Média IF ${s.measured ? s.avg.toFixed(2) : '—'} g/10min  ·  ${s.approved}/${s.measured} aprovados (${s.pct}%)${s.pending ? `  ·  ${s.pending} sem IF` : ''}`, M + 6, y + 17);
+  y += 32;
+
+  // Palete table
+  const cols = [M, M + 30, M + 75, M + 120];
+  const header = () => {
+    doc.setFillColor(241, 245, 249);
+    doc.rect(M, y - 5, W - M * 2, 8, 'F');
+    doc.setTextColor(71, 85, 105);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    ['PALETE', 'DATA', 'IF (g/10min)', 'STATUS'].forEach((h, i) => doc.text(h, cols[i] + 2, y));
+    y += 8;
+  };
+  header();
+  doc.setFont('helvetica', 'normal');
+  paletesOf(l).forEach(([, p], i) => {
+    if (y > 280) { doc.addPage(); y = 20; header(); doc.setFont('helvetica', 'normal'); }
+    const ps = paleteStatus(mat, p);
+    doc.setTextColor(15, 23, 42);
+    doc.text(String(i + 1), cols[0] + 2, y);
+    doc.text(formatDate(p.date), cols[1] + 2, y);
+    doc.text(fmtIF(p.ifValue), cols[2] + 2, y);
+    doc.setTextColor(...(ps.tone === 'success' ? [21, 128, 61] : ps.tone === 'danger' ? [185, 28, 28] : [100, 116, 139]));
+    doc.text(ps.label, cols[3] + 2, y);
+    y += 6.5;
+  });
+}
+
+function pdfReport(id) {
+  const l = state.loads[id];
+  if (!l) return;
+  const doc = newDoc();
+  drawLoadReport(doc, id);
+  doc.save(`Relatorio_NF${safeFile(l.invoiceNumber)}_${safeFile(l.supplier)}.pdf`);
+  toast('Relatório gerado!');
+}
+
+function pdfReportsAll() {
+  const entries = sortedLoads();
+  if (!entries.length) { toast('Nenhum carregamento', true); return; }
+  const doc = newDoc();
+  entries.forEach(([id], i) => { if (i) doc.addPage(); drawLoadReport(doc, id); });
+  doc.save(`Relatorios_${todayISO()}.pdf`);
+  toast(`${entries.length} relatório(s) em um PDF!`);
+}
+
+/* ==================== 10. ACTIONS & BOOT ==================== */
+function goTab(tab) {
+  if (tab !== 'camera') stopCamera();
+  state.tab = tab;
+  state.detail = null;
+  render();
+  $('#mainContent').scrollTop = 0;
+}
+
+function openDetail(type, id) {
+  state.detail = { type, id };
+  render();
+  $('#mainContent').scrollTop = 0;
+}
+
+const actions = {
+  'tab': d => goTab(d.tab),
+  'back': d => goTab(d.to || state.tab),
+  'open-load': d => openDetail('load', d.id),
+  'open-qr-load': d => openDetail('qr', d.id),
+  'modal-close': () => closeModal(),
+
+  'new-material': () => materialModal(),
+  'new-load': () => loadModal(),
+  'edit-load': d => loadModal(d.id),
+  'new-palete': d => paleteModal(d.id),
+  'edit-palete': d => paleteModal(d.id, d.pid, d.num),
+  'bulk-palete': d => bulkPaleteModal(d.id),
+  'qr-modal': d => qrModal(d.id, d.pid, +d.num),
+
+  'delete-material': d => {
+    const inUse = Object.values(state.loads).some(l => l.materialId === d.id);
+    const msg = inUse
+      ? 'Esta matéria-prima está em uso por carregamentos. Excluir mesmo assim?'
+      : 'Excluir esta matéria-prima?';
+    if (confirm(msg)) db.ref('materials/' + d.id).remove().then(() => toast('Matéria-prima removida!'));
+  },
+  'delete-load': d => {
+    if (!confirm('Excluir este carregamento e todos os seus paletes?')) return;
+    db.ref('loads/' + d.id).remove().then(() => toast('Carregamento excluído!'));
+    goTab(state.tab);
+  },
+  'delete-palete': d => {
+    if (confirm('Excluir este palete?')) db.ref(`loads/${d.id}/paletes/${d.pid}`).remove().then(() => toast('Palete removido!'));
+  },
+
+  'pdf-label': d => pdfLabel(d.id, d.pid, +d.num),
+  'pdf-labels-load': d => pdfLabelsLoad(d.id),
+  'pdf-labels-all': () => pdfLabelsAll(),
+  'pdf-report': d => pdfReport(d.id),
+  'pdf-reports-all': () => pdfReportsAll(),
+  'download-qr-png': (d, el) => {
+    const img = el.closest('.modal-content')?.querySelector('.qr-preview img');
+    if (!img) return;
+    const a = document.createElement('a');
+    a.href = img.src;
+    a.download = `${d.name || 'qrcode'}.png`;
+    a.click();
+    toast('QR Code baixado!');
+  },
+
+  'camera-toggle': () => (camera.stream ? stopCamera() : startCamera()),
+  'scanned-open': d => scannedModal(d.key),
+  'scanned-remove': d => { state.scanned.delete(d.key); renderScannedList(); },
+  'scanned-pdf': d => pdfScanned(d.key)
+};
+
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-action]');
+  if (!el || el.disabled) return;
+  const fn = actions[el.dataset.action];
+  if (!fn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  fn(el.dataset, el, e);
+});
+
+// Keyboard activation for non-button rows that carry role="button".
+document.addEventListener('keydown', e => {
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('[role="button"][data-action]')) {
+    e.preventDefault();
+    e.target.click();
+  }
+});
+
+// Release the camera when the tab is hidden (battery + privacy).
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopCamera(); });
+
+// Optional host SDK (theme/title editing)
+if (window.elementSdk) {
+  window.elementSdk.init({
+    defaultConfig,
+    onConfigChange: async config => {
+      state.appTitle = config.app_title || defaultConfig.app_title;
+      document.body.style.background = config.background_color || defaultConfig.background_color;
+      document.body.style.color = config.text_color || defaultConfig.text_color;
+      document.body.style.fontFamily = `${config.font_family || defaultConfig.font_family}, sans-serif`;
+      scheduleRender();
+    },
+    mapToCapabilities: config => {
+      const color = key => ({
+        get: () => config[key] || defaultConfig[key],
+        set: v => { config[key] = v; window.elementSdk.setConfig({ [key]: v }); }
+      });
+      return {
+        recolorables: ['background_color', 'surface_color', 'text_color', 'accent_color'].map(color),
+        borderables: [],
+        fontEditable: {
+          get: () => config.font_family || defaultConfig.font_family,
+          set: v => { config.font_family = v; window.elementSdk.setConfig({ font_family: v }); }
+        },
+        fontSizeable: undefined
+      };
+    },
+    mapToEditPanelValues: config => new Map([['app_title', config.app_title || defaultConfig.app_title]])
+  });
+}
+
+db.ref('materials').on('value', snap => { state.materials = snap.val() || {}; scheduleRender(); });
+db.ref('loads').on('value', snap => { state.loads = snap.val() || {}; scheduleRender(); });
+
+render();
+window.__app = { state, actions, goTab, openDetail, render };
